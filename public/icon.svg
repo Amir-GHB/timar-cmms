@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="waterGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0284c7" />
+      <stop offset="100%" stop-color="#0369a1" />
+    </linearGradient>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#1e293b" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="110" fill="url(#bgGrad)"/>
+  <!-- Industrial Water Drop + Gear Symbol -->
+  <g transform="translate(256, 256)">
+    <!-- Gear teeth circle -->
+    <path d="M-40 -150 L40 -150 L50 -120 A160 160 0 0 1 120 -50 L150 -40 L150 40 L120 50 A160 160 0 0 1 50 120 L40 150 L-40 150 L-50 120 A160 160 0 0 1 -120 50 L-150 40 L-150 -40 L-120 -50 A160 160 0 0 1 -50 -120 Z" fill="#38bdf8" opacity="0.25"/>
+    <!-- Water droplet in center -->
+    <path d="M0 -140 C50 -80 120 10 120 90 C120 156 66 210 0 210 C-66 210 -120 156 -120 90 C-120 10 -50 -80 0 -140 Z" fill="url(#waterGrad)"/>
+    <!-- Inner ripple and wrench highlight -->
+    <path d="M-40 90 C-40 68 -22 50 0 50 C22 50 40 68 40 90 C40 112 22 130 0 130 C-22 130 -40 112 -40 90 Z" fill="#ffffff" opacity="0.85"/>
+    <circle cx="0" cy="90" r="16" fill="#0284c7" />
+  </g>
+</svg>

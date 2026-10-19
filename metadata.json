@@ -1,0 +1,6 @@
+{
+  "name": "Timar CMMS - Water Treatment Plant",
+  "description": "Industrial maintenance management system (PWA) with Google Sheets and Google Apps Script sync, offline-first persistence, and role-based access control.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
