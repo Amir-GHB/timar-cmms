@@ -23,6 +23,7 @@ import type {
   UsedPart,
   User,
 } from '../../types';
+import { TimeService } from '../../utils/timeService';
 import { toPersianDigits } from '../../utils/persianDate';
 
 interface EventModalProps {
@@ -33,6 +34,7 @@ interface EventModalProps {
   inventory: StoragePart[];
   currentUser: User | null;
   preselectedAssetId?: string;
+  preselectedScheduleId?: string;
   onSaveEvent: (event: Omit<MaintenanceEvent, 'id' | 'updatedAt'>) => void;
 }
 
@@ -44,16 +46,18 @@ export const EventModal: React.FC<EventModalProps> = ({
   inventory,
   currentUser,
   preselectedAssetId,
+  preselectedScheduleId,
   onSaveEvent,
 }) => {
+  const todayTehran = TimeService.getTehranDateString();
   const [assetId, setAssetId] = useState(preselectedAssetId || assets[0]?.id || '');
   const [title, setTitle] = useState('');
   const [hasDeadline, setHasDeadline] = useState<boolean>(true);
   const [deadlineDate, setDeadlineDate] = useState(
-    new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0]
+    TimeService.calculateNextDueDate(todayTehran, 'days', 7)
   );
-  const [affectedScheduleId, setAffectedScheduleId] = useState<string>('');
-  const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+  const [affectedScheduleId, setAffectedScheduleId] = useState<string>(preselectedScheduleId || '');
+  const [date, setDate] = useState(todayTehran);
   const [durationHours, setDurationHours] = useState('2.0');
   const [downtimeHours, setDowntimeHours] = useState('0.0');
   const [description, setDescription] = useState('');
@@ -65,12 +69,25 @@ export const EventModal: React.FC<EventModalProps> = ({
   const [partQty, setPartQty] = useState('1');
 
   useEffect(() => {
+    if (preselectedScheduleId) {
+      const sch = schedules.find((s) => s.id === preselectedScheduleId);
+      if (sch) {
+        setAssetId(sch.assetId);
+        setAffectedScheduleId(sch.id);
+        setTitle(`اجرای سرویس PM: ${sch.taskTitle}`);
+        setDescription(sch.description);
+        setDate(sch.nextDueDate || todayTehran);
+        setHasDeadline(true);
+        setDeadlineDate(sch.nextDueDate || todayTehran);
+        return;
+      }
+    }
     if (preselectedAssetId) {
       setAssetId(preselectedAssetId);
     } else if (assets.length > 0 && !assetId) {
       setAssetId(assets[0].id);
     }
-  }, [preselectedAssetId, assets]);
+  }, [preselectedAssetId, preselectedScheduleId, schedules, assets]);
 
   if (!isOpen) return null;
 
@@ -125,7 +142,13 @@ export const EventModal: React.FC<EventModalProps> = ({
       date,
       hasDeadline,
       deadlineDate: hasDeadline ? deadlineDate : undefined,
+      originatingScheduleId: affectedScheduleId || undefined,
+      scheduleId: affectedScheduleId || undefined,
+      scheduleOccurrenceDate: hasDeadline ? deadlineDate : undefined,
       affectedScheduleId: affectedScheduleId || undefined,
+      isAutomatedPM: !!affectedScheduleId,
+      sideEffectsApplied: false,
+      isProvisionalTime: !TimeService.isServerTimeConfirmed(),
       technicianId: currentUser?.id || 'usr-2',
       technicianName: currentUser?.fullName || 'تکنسین عملیات',
       durationHours: parseFloat(durationHours) || 0,

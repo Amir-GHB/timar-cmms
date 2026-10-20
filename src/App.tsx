@@ -26,20 +26,7 @@ import { SubAssetModal } from './components/assets/SubAssetModal';
 import { ScheduleModal } from './components/schedules/ScheduleModal';
 import { LoginModal } from './components/auth/LoginModal';
 import { OfflineIndicator } from './components/common/OfflineIndicator';
-
-function calculateNextDueDate(
-  baseDateStr: string,
-  intervalType: 'days' | 'weeks' | 'months' | 'hours',
-  intervalValue: number
-): string {
-  const d = new Date(baseDateStr);
-  if (isNaN(d.getTime())) return new Date().toISOString().split('T')[0];
-  if (intervalType === 'days') d.setDate(d.getDate() + intervalValue);
-  else if (intervalType === 'weeks') d.setDate(d.getDate() + intervalValue * 7);
-  else if (intervalType === 'months') d.setMonth(d.getMonth() + intervalValue);
-  else if (intervalType === 'hours') d.setDate(d.getDate() + Math.ceil(intervalValue / 24));
-  return d.toISOString().split('T')[0];
-}
+import { TimeService } from './utils/timeService';
 
 export default function App() {
   const [activeSection, setActiveSection] = useState<MainSection>('dashboard');
@@ -60,6 +47,7 @@ export default function App() {
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [isEventModalOpen, setIsEventModalOpen] = useState(false);
   const [preselectedAssetId, setPreselectedAssetId] = useState<string | undefined>(undefined);
+  const [preselectedScheduleId, setPreselectedScheduleId] = useState<string | undefined>(undefined);
 
   const [isAssetModalOpen, setIsAssetModalOpen] = useState(false);
   const [editingAsset, setEditingAsset] = useState<Asset | null>(null);
@@ -70,9 +58,45 @@ export default function App() {
   const [isScheduleModalOpen, setIsScheduleModalOpen] = useState(false);
   const [targetAssetForSchedule, setTargetAssetForSchedule] = useState<Asset | null>(null);
 
+  // Centralized evaluation of active schedules: generates due events without advancing nextDueDate
+  const evaluateActiveSchedules = async () => {
+    const db = await getDB();
+    const [allSchedules, allEvents] = await Promise.all([
+      db.getAll('schedules'),
+      db.getAll('events'),
+    ]);
+
+    const { newEvents, updatedSchedules } = TimeService.evaluateSchedules(
+      allSchedules.filter((s) => !s.isDeleted),
+      allEvents.filter((e) => !e.isDeleted)
+    );
+
+    if (newEvents.length > 0) {
+      for (const evt of newEvents) {
+        await db.put('events', evt);
+        await SyncEngine.queueMutation('events', 'create', evt.id, evt as any);
+      }
+      setEvents((prev) => [...newEvents, ...prev]);
+    }
+
+    if (updatedSchedules.length > 0) {
+      for (const sch of updatedSchedules) {
+        await db.put('schedules', sch);
+        await SyncEngine.queueMutation('schedules', 'update', sch.id, sch as any);
+      }
+      setSchedules((prev) =>
+        prev.map((s) => {
+          const matched = updatedSchedules.find((u) => u.id === s.id);
+          return matched || s;
+        })
+      );
+    }
+  };
+
   // Load state on startup
   useEffect(() => {
     let unsubscribeSync: (() => void) | null = null;
+    let evalInterval: any = null;
 
     async function loadData() {
       await initializeDatabase();
@@ -113,8 +137,9 @@ export default function App() {
         setCurrentUser(loadedUsers[0]);
       }
 
-      if (typeof urlSetting?.value === 'string') {
-        setAppsScriptUrl(urlSetting.value);
+      const scriptUrl = typeof urlSetting?.value === 'string' ? urlSetting.value : '';
+      if (scriptUrl) {
+        setAppsScriptUrl(scriptUrl);
       }
 
       setPendingCount(queueCount);
@@ -124,12 +149,26 @@ export default function App() {
         setSyncStatus(st);
         setPendingCount(count);
       });
+
+      // Run initial schedule check
+      await evaluateActiveSchedules();
+
+      // If online and URL is present, run initial sync
+      if (scriptUrl && navigator.onLine) {
+        SyncEngine.triggerSync().then(() => evaluateActiveSchedules()).catch(() => {});
+      }
+
+      // Check schedules periodically every 60 seconds
+      evalInterval = setInterval(() => {
+        evaluateActiveSchedules().catch(() => {});
+      }, 60000);
     }
 
     loadData();
 
     return () => {
       if (unsubscribeSync) unsubscribeSync();
+      if (evalInterval) clearInterval(evalInterval);
     };
   }, []);
 
@@ -163,6 +202,8 @@ export default function App() {
     setSchedules(updatedSchedules.filter((s) => !s.isDeleted));
     setInventory(updatedInventory.filter((i) => !i.isDeleted));
     setPendingCount(newPending);
+
+    await evaluateActiveSchedules();
   };
 
   // User profile switch
@@ -179,10 +220,11 @@ export default function App() {
     await db.put('settings', { key: 'appsScriptUrl', value: url });
   };
 
-  // Deduct inventory parts helper
+  // Deduct inventory parts helper (Idempotent)
   const deductInventoryParts = async (parts: MaintenanceEvent['partsUsed']) => {
     const db = await getDB();
     const updatedInventoryList = [...inventory];
+    const nowMs = TimeService.now();
 
     for (const p of parts) {
       const idx = updatedInventoryList.findIndex((i) => i.id === p.storagePartId);
@@ -192,7 +234,7 @@ export default function App() {
         const updatedItem: StoragePart = {
           ...item,
           quantityInStock: newStock,
-          updatedAt: Date.now(),
+          updatedAt: nowMs,
         };
         updatedInventoryList[idx] = updatedItem;
         await db.put('inventory', updatedItem);
@@ -202,19 +244,24 @@ export default function App() {
     setInventory(updatedInventoryList);
   };
 
-  // Reset Schedule helper
-  const resetScheduleDueToEvent = async (scheduleId: string, eventDate: string) => {
+  // Reset/Advance Schedule helper upon verified maintenance completion
+  const resetScheduleDueToEvent = async (scheduleId: string, eventCompletionDate: string) => {
     const db = await getDB();
     const sch = schedules.find((s) => s.id === scheduleId);
     if (!sch) return;
 
-    const nextDate = calculateNextDueDate(eventDate, sch.intervalType, sch.intervalValue);
+    const nextDate = TimeService.calculateNextDueDate(
+      eventCompletionDate,
+      sch.intervalType,
+      sch.intervalValue
+    );
+    const nowMs = TimeService.now();
     const updatedSch: MaintenanceSchedule = {
       ...sch,
-      lastPerformedDate: eventDate,
+      lastPerformedDate: eventCompletionDate,
       nextDueDate: nextDate,
       status: 'active',
-      updatedAt: Date.now(),
+      updatedAt: nowMs,
     };
 
     await db.put('schedules', updatedSch);
@@ -224,68 +271,88 @@ export default function App() {
 
   // Save Event
   const handleSaveEvent = async (eventData: Omit<MaintenanceEvent, 'id' | 'updatedAt'>) => {
-    const newId = `evt-${Date.now()}`;
+    const nowMs = TimeService.now();
+    const isAutomated = !!(eventData.isAutomatedPM && eventData.originatingScheduleId && eventData.scheduleOccurrenceDate);
+    const newId = isAutomated
+      ? TimeService.makeAutomatedEventId(eventData.originatingScheduleId!, eventData.scheduleOccurrenceDate!)
+      : `evt-${nowMs}-${Math.random().toString(36).substring(2, 6)}`;
+
+    let sideEffectsApplied = false;
+    if (eventData.status === 'completed') {
+      if (eventData.partsUsed.length > 0) {
+        await deductInventoryParts(eventData.partsUsed);
+      }
+      const schedId = eventData.affectedScheduleId || eventData.originatingScheduleId;
+      if (schedId) {
+        await resetScheduleDueToEvent(schedId, eventData.date);
+      }
+      sideEffectsApplied = true;
+    }
+
     const newEvent: MaintenanceEvent = {
       ...eventData,
       id: newId,
-      updatedAt: Date.now(),
+      sideEffectsApplied,
+      updatedAt: nowMs,
     };
 
     const db = await getDB();
     await db.put('events', newEvent);
     setEvents((prev) => [newEvent, ...prev]);
 
-    if (newEvent.status === 'completed') {
-      if (newEvent.partsUsed.length > 0) {
-        await deductInventoryParts(newEvent.partsUsed);
-      }
-      if (newEvent.affectedScheduleId) {
-        await resetScheduleDueToEvent(newEvent.affectedScheduleId, newEvent.date);
-      }
-    }
-
     await SyncEngine.queueMutation('events', 'create', newId, newEvent as any);
   };
 
-  // Manager Approve Event
+  // Manager Approve Event (Idempotent: advances schedule & deducts inventory exactly once)
   const handleApproveEvent = async (eventId: string, approvalNotes: string) => {
     const target = events.find((e) => e.id === eventId);
     if (!target) return;
 
+    // Idempotency: skip if already completed and side-effects applied
+    if (target.status === 'completed' && target.sideEffectsApplied) return;
+
+    const nowMs = TimeService.now();
+    const todayTehran = TimeService.getTehranDateString(nowMs);
+
+    if (!target.sideEffectsApplied) {
+      if (target.partsUsed.length > 0) {
+        await deductInventoryParts(target.partsUsed);
+      }
+      const schedId = target.affectedScheduleId || target.originatingScheduleId;
+      if (schedId) {
+        await resetScheduleDueToEvent(schedId, target.date || todayTehran);
+      }
+    }
+
     const updatedEvent: MaintenanceEvent = {
       ...target,
       status: 'completed',
+      sideEffectsApplied: true,
       approvedBy: currentUser?.fullName || 'مدیر فنی',
       approvalNotes,
-      approvalDate: new Date().toISOString(),
-      updatedAt: Date.now(),
+      approvalDate: todayTehran,
+      updatedAt: nowMs,
     };
 
     const db = await getDB();
     await db.put('events', updatedEvent);
     setEvents((prev) => prev.map((e) => (e.id === eventId ? updatedEvent : e)));
 
-    if (target.partsUsed.length > 0) {
-      await deductInventoryParts(target.partsUsed);
-    }
-
-    if (target.affectedScheduleId) {
-      await resetScheduleDueToEvent(target.affectedScheduleId, target.date);
-    }
-
     await SyncEngine.queueMutation('events', 'update', updatedEvent.id, updatedEvent as any);
   };
 
-  // Manager Reject Event
+  // Manager Reject Event (Sent back for revisions; does NOT advance schedule or deduct inventory)
   const handleRejectEvent = async (eventId: string, revisionNotes: string) => {
     const target = events.find((e) => e.id === eventId);
     if (!target) return;
 
+    const nowMs = TimeService.now();
     const updatedEvent: MaintenanceEvent = {
       ...target,
       status: 'rejected',
+      sideEffectsApplied: false,
       approvalNotes: revisionNotes,
-      updatedAt: Date.now(),
+      updatedAt: nowMs,
     };
 
     const db = await getDB();
@@ -552,6 +619,12 @@ export default function App() {
               userRole={currentUser?.role}
               onOpenCreateEvent={(assetId) => {
                 setPreselectedAssetId(assetId);
+                setPreselectedScheduleId(undefined);
+                setIsEventModalOpen(true);
+              }}
+              onOpenCreateEventFromSchedule={(assetId, scheduleId) => {
+                setPreselectedAssetId(assetId);
+                setPreselectedScheduleId(scheduleId);
                 setIsEventModalOpen(true);
               }}
               onOpenCreateSchedule={(assetId) => {
@@ -668,12 +741,14 @@ export default function App() {
         onClose={() => {
           setIsEventModalOpen(false);
           setPreselectedAssetId(undefined);
+          setPreselectedScheduleId(undefined);
         }}
         assets={assets}
         schedules={schedules}
         inventory={inventory}
         currentUser={currentUser}
         preselectedAssetId={preselectedAssetId}
+        preselectedScheduleId={preselectedScheduleId}
         onSaveEvent={handleSaveEvent}
       />
 

@@ -101,21 +101,50 @@ export function getDB(): Promise<IDBPDatabase<TimarDB>> {
   return dbPromise;
 }
 
+import { TimeService } from '../utils/timeService';
+
 // Default Seed Data for Water Treatment Plant (in authentic Persian matching Timar Qt)
 export async function initializeDatabase(): Promise<void> {
+  TimeService.initFromStorage();
   const db = await getDB();
   const existingAssets = await db.getAll('assets');
 
-  // If already seeded with Persian data, ensure imageUrl exists and skip
+  // If already seeded with Persian data, ensure schema fields are migrated safely without erasing data
   if (existingAssets.length > 0 && existingAssets[0].name.includes('پمپ')) {
-    let needsImageUpdate = false;
+    // 1. Ensure assets have imageUrl
     for (const ast of existingAssets) {
       if (!ast.imageUrl) {
         ast.imageUrl = 'https://images.unsplash.com/photo-1581092160607-ee22621dd758?auto=format&fit=crop&w=600&q=80';
         await db.put('assets', ast);
-        needsImageUpdate = true;
       }
     }
+
+    // 2. Safe migration: ensure existing events have sideEffectsApplied
+    const existingEvents = await db.getAll('events');
+    for (const evt of existingEvents) {
+      let changed = false;
+      if (evt.sideEffectsApplied === undefined) {
+        evt.sideEffectsApplied = evt.status === 'completed';
+        changed = true;
+      }
+      if (changed) {
+        await db.put('events', evt);
+      }
+    }
+
+    // 3. Safe migration: ensure existing schedules have lastGeneratedDueDate
+    const existingSchedules = await db.getAll('schedules');
+    for (const sch of existingSchedules) {
+      let changed = false;
+      if (sch.lastGeneratedDueDate === undefined) {
+        sch.lastGeneratedDueDate = sch.lastPerformedDate || '';
+        changed = true;
+      }
+      if (changed) {
+        await db.put('schedules', sch);
+      }
+    }
+
     return;
   }
 
@@ -127,7 +156,7 @@ export async function initializeDatabase(): Promise<void> {
   await db.clear('schedules');
   await db.clear('inventory');
 
-  const now = Date.now();
+  const now = TimeService.now();
 
   // 1. Users
   const defaultUsers: User[] = [

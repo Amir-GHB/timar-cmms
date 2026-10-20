@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { X, CalendarClock, Save, HelpCircle } from 'lucide-react';
 import type { MaintenanceSchedule, IntervalType, Role } from '../../types';
+import { TimeService } from '../../utils/timeService';
 
 interface ScheduleModalProps {
   isOpen: boolean;
@@ -19,30 +20,21 @@ export const ScheduleModal: React.FC<ScheduleModalProps> = ({
   assetCode,
   onSave,
 }) => {
+  const todayTehran = TimeService.getTehranDateString();
   const [taskTitle, setTaskTitle] = useState('');
   const [description, setDescription] = useState('');
   const [intervalType, setIntervalType] = useState<IntervalType>('months');
   const [intervalValue, setIntervalValue] = useState('1');
-  const [lastPerformedDate, setLastPerformedDate] = useState(
-    new Date().toISOString().split('T')[0]
-  );
+  const [lastPerformedDate, setLastPerformedDate] = useState(todayTehran);
   const [assignedRole, setAssignedRole] = useState<Role>('technician');
 
   if (!isOpen) return null;
 
-  // Calculate next due date
-  const computeNextDue = (baseDateStr: string, type: IntervalType, val: number): string => {
-    const d = new Date(baseDateStr);
-    if (isNaN(d.getTime())) return new Date().toISOString().split('T')[0];
-
-    if (type === 'days') d.setDate(d.getDate() + val);
-    else if (type === 'weeks') d.setDate(d.getDate() + val * 7);
-    else if (type === 'months') d.setMonth(d.getMonth() + val);
-    else if (type === 'hours') d.setDate(d.getDate() + Math.ceil(val / 24)); // approx
-    return d.toISOString().split('T')[0];
-  };
-
-  const nextDueDate = computeNextDue(lastPerformedDate, intervalType, parseInt(intervalValue, 10) || 1);
+  const nextDueDate = TimeService.calculateNextDueDate(
+    lastPerformedDate,
+    intervalType,
+    parseInt(intervalValue, 10) || 1
+  );
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -58,6 +50,7 @@ export const ScheduleModal: React.FC<ScheduleModalProps> = ({
       intervalValue: parseInt(intervalValue, 10) || 1,
       lastPerformedDate,
       nextDueDate,
+      lastGeneratedDueDate: '',
       status: 'active',
       assignedRole,
     });

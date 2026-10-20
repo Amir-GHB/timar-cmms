@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import type { MaintenanceEvent, Asset, MaintenanceSchedule } from '../../types';
 import { formatPersianDate, toPersianDigits } from '../../utils/persianDate';
+import { TimeService } from '../../utils/timeService';
 import { EventDetailsModal } from '../maintenance/EventDetailsModal';
 
 interface ReportsSectionViewProps {
@@ -56,7 +57,7 @@ export const ReportsSectionView: React.FC<ReportsSectionViewProps> = ({
     }
   };
 
-  const todayIso = new Date().toISOString().split('T')[0];
+  const todayIso = TimeService.getTehranDateString();
 
   // Reports only show what happened (completed) or what was supposed to happen and didn't happen / is overdue
   const relevantEvents = events.filter((e) => {
