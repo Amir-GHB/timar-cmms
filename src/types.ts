@@ -61,9 +61,10 @@ export type MaintenanceType = 'preventive' | 'corrective' | 'emergency';
 export type MaintenanceStatus =
   | 'scheduled'
   | 'in_progress'
-  | 'pending_approval' // Technician submitted completion request
-  | 'completed'        // Manager approved
-  | 'rejected'         // Manager requested revisions
+  | 'pending_request'  // Technician submitted request awaiting manager authorization
+  | 'pending_approval' // Technician submitted completion request awaiting sign-off
+  | 'completed'        // Manager approved & closed
+  | 'rejected'         // Manager requested revisions or declined
   | 'cancelled'        // Cancelled maintenance order
   | 'overdue'          // Expired deadline
   | 'missed';          // Past catch-up threshold

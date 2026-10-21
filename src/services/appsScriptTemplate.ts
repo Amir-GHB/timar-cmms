@@ -195,6 +195,31 @@ function processDueSchedules() {
   var nowMs = new Date().getTime();
   var generatedCount = 0;
 
+  // 1. Reconcile Expired Manual Events -> 'missed'
+  for (var r = 1; r < evtValues.length; r++) {
+    var evtRow = evtValues[r];
+    var isEvtDeleted = !!evtRow[evtColMap["isDeleted"]];
+    if (isEvtDeleted) continue;
+
+    var curStatus = String(evtRow[evtColMap["status"]]);
+    if (curStatus !== "scheduled" && curStatus !== "in_progress") continue;
+
+    var isAutomated = !!evtRow[evtColMap["isAutomatedPM"]];
+    var hasDeadline = !!evtRow[evtColMap["hasDeadline"]];
+    var deadlineDate = String(evtRow[evtColMap["deadlineDate"]] || evtRow[evtColMap["date"]] || "");
+
+    if (!isAutomated && hasDeadline && deadlineDate && deadlineDate < todayTehran) {
+      if (evtColMap["status"] !== undefined) {
+        evtSheet.getRange(r + 1, evtColMap["status"] + 1).setValue("missed");
+      }
+      if (evtColMap["updatedAt"] !== undefined) {
+        evtSheet.getRange(r + 1, evtColMap["updatedAt"] + 1).setValue(nowMs);
+      }
+      evtRow[evtColMap["status"]] = "missed";
+    }
+  }
+
+  // 2. Reconcile Recurring Schedules and Occurrences
   for (var s = 1; s < schedValues.length; s++) {
     var row = schedValues[s];
     var isDeleted = !!row[schedColMap["isDeleted"]];
@@ -205,11 +230,47 @@ function processDueSchedules() {
     var nextDueDate = String(row[schedColMap["nextDueDate"]]);
     if (!nextDueDate) continue;
 
-    var isDue = nextDueDate <= todayTehran;
-    var deterministicEventId = "evt-pm-" + schId + "-" + nextDueDate;
+    var intervalType = String(row[schedColMap["intervalType"]] || "months");
+    var intervalValue = parseInt(row[schedColMap["intervalValue"]], 10) || 1;
 
     var scheduleRowIndex = s + 1; // 1-based
     var scheduleUpdated = false;
+
+    // Check if the previous occurrence's window has expired because next interval arrived
+    var subsequentIntervalDate = calculateNextDueDate(nextDueDate, intervalType, intervalValue);
+    if (todayTehran >= subsequentIntervalDate) {
+      var prevDeterministicId = "evt-pm-" + schId + "-" + nextDueDate;
+      for (var er = 1; er < evtValues.length; er++) {
+        var eRow = evtValues[er];
+        if (!!eRow[evtColMap["isDeleted"]]) continue;
+        var rowId = String(eRow[evtColMap["id"]]);
+        var rowOrigSch = String(eRow[evtColMap["originatingScheduleId"]]);
+        var rowOcc = String(eRow[evtColMap["scheduleOccurrenceDate"]]);
+
+        if ((rowOrigSch === schId || rowId === prevDeterministicId) && rowOcc === nextDueDate) {
+          var eStatus = String(eRow[evtColMap["status"]]);
+          if (eStatus === "scheduled" || eStatus === "in_progress") {
+            if (evtColMap["status"] !== undefined) {
+              evtSheet.getRange(er + 1, evtColMap["status"] + 1).setValue("missed");
+            }
+            if (evtColMap["updatedAt"] !== undefined) {
+              evtSheet.getRange(er + 1, evtColMap["updatedAt"] + 1).setValue(nowMs);
+            }
+            eRow[evtColMap["status"]] = "missed";
+          }
+        }
+      }
+
+      // Advance schedule's nextDueDate to the subsequent interval
+      nextDueDate = subsequentIntervalDate;
+      if (schedColMap["nextDueDate"] !== undefined) {
+        schedSheet.getRange(scheduleRowIndex, schedColMap["nextDueDate"] + 1).setValue(nextDueDate);
+        scheduleUpdated = true;
+      }
+    }
+
+    var isDue = nextDueDate <= todayTehran;
+    var deterministicEventId = "evt-pm-" + schId + "-" + nextDueDate;
 
     // Check overdue status
     if (isDue && nextDueDate < todayTehran && status !== "overdue") {
@@ -224,7 +285,8 @@ function processDueSchedules() {
       }
     }
 
-    if (isDue && !existingEventIds[deterministicEventId]) {
+    var lastGenDate = schedColMap["lastGeneratedDueDate"] !== undefined ? String(row[schedColMap["lastGeneratedDueDate"]] || "") : "";
+    if (isDue && !existingEventIds[deterministicEventId] && lastGenDate !== nextDueDate) {
       // Build event row
       var newEventRow = [];
       var evtObj = {
@@ -247,7 +309,7 @@ function processDueSchedules() {
         isProvisionalTime: false,
         technicianId: row[schedColMap["assignedRole"]] === "technician" ? "usr-2" : "usr-1",
         technicianName: row[schedColMap["assignedRole"]] === "technician" ? "واحد تعمیرات مکانیک" : "مدیر فنی",
-        durationHours: 1.5,
+        durationHours: 0,
         description: row[schedColMap["description"]] || "انجام بازرسی و سرویس دوره‌ای نت",
         solution: "",
         partsUsedJson: "[]",

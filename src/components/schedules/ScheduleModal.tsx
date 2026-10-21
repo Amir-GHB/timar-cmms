@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { X, CalendarClock, Save, HelpCircle } from 'lucide-react';
 import type { MaintenanceSchedule, IntervalType, Role } from '../../types';
 import { TimeService } from '../../utils/timeService';
+import { PersianDatePicker } from '../common/PersianDatePicker';
+import { formatPersianDate } from '../../utils/persianDate';
 
 interface ScheduleModalProps {
   isOpen: boolean;
@@ -140,26 +142,24 @@ export const ScheduleModal: React.FC<ScheduleModalProps> = ({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label className="block font-bold text-slate-700 mb-1">تاریخ آخرین اجرا</label>
-              <input
-                type="date"
+              <PersianDatePicker
+                label="تاریخ آخرین اجرا"
                 required
                 value={lastPerformedDate}
-                onChange={(e) => setLastPerformedDate(e.target.value)}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono"
+                onChange={setLastPerformedDate}
               />
             </div>
 
             <div>
-              <label className="block font-bold text-slate-700 mb-1">موعد انجام بعدی (محاسبه خودکار)</label>
-              <input
-                type="date"
-                readOnly
-                value={nextDueDate}
-                className="w-full px-3 py-2 border border-slate-200 bg-slate-50 text-slate-700 rounded-lg font-mono"
-              />
+              <label className="block font-bold text-slate-700 text-xs mb-1">
+                موعد انجام بعدی (محاسبه خودکار)
+              </label>
+              <div className="w-full px-3 py-2 border border-slate-200 bg-slate-50 text-slate-800 rounded-lg font-mono font-bold text-xs flex items-center justify-between">
+                <span>{formatPersianDate(nextDueDate, { showMonthName: true })}</span>
+                <span className="text-[10px] text-slate-500 font-normal">({formatPersianDate(nextDueDate)})</span>
+              </div>
             </div>
           </div>
 

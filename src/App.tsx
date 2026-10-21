@@ -7,6 +7,7 @@ import type {
   MaintenanceSchedule,
   StoragePart,
   SyncStatus,
+  UsedPart,
 } from './types';
 import { getDB, initializeDatabase } from './services/db';
 import { SyncEngine } from './services/syncEngine';
@@ -46,6 +47,7 @@ export default function App() {
   // Modals state
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [isEventModalOpen, setIsEventModalOpen] = useState(false);
+  const [editingEvent, setEditingEvent] = useState<MaintenanceEvent | null>(null);
   const [preselectedAssetId, setPreselectedAssetId] = useState<string | undefined>(undefined);
   const [preselectedScheduleId, setPreselectedScheduleId] = useState<string | undefined>(undefined);
 
@@ -66,10 +68,23 @@ export default function App() {
       db.getAll('events'),
     ]);
 
-    const { newEvents, updatedSchedules } = TimeService.evaluateSchedules(
+    const { newEvents, updatedEvents, updatedSchedules } = TimeService.evaluateSchedules(
       allSchedules.filter((s) => !s.isDeleted),
-      allEvents.filter((e) => !e.isDeleted)
+      allEvents
     );
+
+    if (updatedEvents.length > 0) {
+      for (const evt of updatedEvents) {
+        await db.put('events', evt);
+        await SyncEngine.queueMutation('events', 'update', evt.id, evt as any);
+      }
+      setEvents((prev) =>
+        prev.map((e) => {
+          const matched = updatedEvents.find((u) => u.id === e.id);
+          return matched || e;
+        })
+      );
+    }
 
     if (newEvents.length > 0) {
       for (const evt of newEvents) {
@@ -269,9 +284,45 @@ export default function App() {
     await SyncEngine.queueMutation('schedules', 'update', updatedSch.id, updatedSch as any);
   };
 
-  // Save Event
-  const handleSaveEvent = async (eventData: Omit<MaintenanceEvent, 'id' | 'updatedAt'>) => {
+  // Save or Update Event
+  const handleSaveEvent = async (
+    eventData: Omit<MaintenanceEvent, 'id' | 'updatedAt'>,
+    existingEventId?: string
+  ) => {
     const nowMs = TimeService.now();
+    const todayTehran = TimeService.getTehranDateString(nowMs);
+    const db = await getDB();
+
+    if (existingEventId) {
+      const existing = events.find((e) => e.id === existingEventId);
+      if (!existing) return;
+
+      let sideEffectsApplied = existing.sideEffectsApplied || false;
+      if (eventData.status === 'completed' && !sideEffectsApplied) {
+        if (eventData.partsUsed.length > 0) {
+          await deductInventoryParts(eventData.partsUsed);
+        }
+        const schedId = eventData.affectedScheduleId || eventData.originatingScheduleId;
+        if (schedId) {
+          await resetScheduleDueToEvent(schedId, eventData.date || todayTehran);
+        }
+        sideEffectsApplied = true;
+      }
+
+      const updatedEvent: MaintenanceEvent = {
+        ...existing,
+        ...eventData,
+        id: existingEventId,
+        sideEffectsApplied,
+        updatedAt: nowMs,
+      };
+
+      await db.put('events', updatedEvent);
+      setEvents((prev) => prev.map((e) => (e.id === existingEventId ? updatedEvent : e)));
+      await SyncEngine.queueMutation('events', 'update', existingEventId, updatedEvent as any);
+      return;
+    }
+
     const isAutomated = !!(eventData.isAutomatedPM && eventData.originatingScheduleId && eventData.scheduleOccurrenceDate);
     const newId = isAutomated
       ? TimeService.makeAutomatedEventId(eventData.originatingScheduleId!, eventData.scheduleOccurrenceDate!)
@@ -284,7 +335,7 @@ export default function App() {
       }
       const schedId = eventData.affectedScheduleId || eventData.originatingScheduleId;
       if (schedId) {
-        await resetScheduleDueToEvent(schedId, eventData.date);
+        await resetScheduleDueToEvent(schedId, eventData.date || todayTehran);
       }
       sideEffectsApplied = true;
     }
@@ -296,11 +347,147 @@ export default function App() {
       updatedAt: nowMs,
     };
 
-    const db = await getDB();
     await db.put('events', newEvent);
     setEvents((prev) => [newEvent, ...prev]);
-
     await SyncEngine.queueMutation('events', 'create', newId, newEvent as any);
+  };
+
+  // Complete Event (from CompleteEventModal)
+  const handleCompleteEvent = async (
+    eventId: string,
+    completionData: {
+      solution: string;
+      durationHours: number;
+      downtimeHours: number;
+      partsUsed: UsedPart[];
+    }
+  ) => {
+    const target = events.find((e) => e.id === eventId);
+    if (!target) return;
+
+    const nowMs = TimeService.now();
+    const todayTehran = TimeService.getTehranDateString(nowMs);
+    const db = await getDB();
+
+    if (currentUser?.role === 'manager') {
+      let sideEffectsApplied = target.sideEffectsApplied || false;
+      if (!sideEffectsApplied) {
+        if (completionData.partsUsed.length > 0) {
+          await deductInventoryParts(completionData.partsUsed);
+        }
+        const schedId = target.affectedScheduleId || target.originatingScheduleId;
+        if (schedId) {
+          await resetScheduleDueToEvent(schedId, target.date || todayTehran);
+        }
+        sideEffectsApplied = true;
+      }
+
+      const updatedEvent: MaintenanceEvent = {
+        ...target,
+        status: 'completed',
+        solution: completionData.solution,
+        durationHours: completionData.durationHours,
+        downtimeHours: completionData.downtimeHours,
+        partsUsed: completionData.partsUsed,
+        sideEffectsApplied,
+        approvedBy: currentUser?.fullName || 'مدیر فنی',
+        approvalDate: todayTehran,
+        approvalNotes: 'تکمیل مستقیم توسط مدیر فنی',
+        updatedAt: nowMs,
+      };
+
+      await db.put('events', updatedEvent);
+      setEvents((prev) => prev.map((e) => (e.id === eventId ? updatedEvent : e)));
+      await SyncEngine.queueMutation('events', 'update', eventId, updatedEvent as any);
+    } else {
+      const updatedEvent: MaintenanceEvent = {
+        ...target,
+        status: 'pending_approval',
+        solution: completionData.solution,
+        durationHours: completionData.durationHours,
+        downtimeHours: completionData.downtimeHours,
+        partsUsed: completionData.partsUsed,
+        sideEffectsApplied: false,
+        updatedAt: nowMs,
+      };
+
+      await db.put('events', updatedEvent);
+      setEvents((prev) => prev.map((e) => (e.id === eventId ? updatedEvent : e)));
+      await SyncEngine.queueMutation('events', 'update', eventId, updatedEvent as any);
+    }
+  };
+
+  // Start Event (in progress)
+  const handleStartEvent = async (eventId: string) => {
+    const target = events.find((e) => e.id === eventId);
+    if (!target) return;
+
+    const nowMs = TimeService.now();
+    const updatedEvent: MaintenanceEvent = {
+      ...target,
+      status: 'in_progress',
+      updatedAt: nowMs,
+    };
+
+    const db = await getDB();
+    await db.put('events', updatedEvent);
+    setEvents((prev) => prev.map((e) => (e.id === eventId ? updatedEvent : e)));
+    await SyncEngine.queueMutation('events', 'update', eventId, updatedEvent as any);
+  };
+
+  // Authorize Event (Manager authorizes pending manual request -> scheduled)
+  const handleAuthorizeEvent = async (eventId: string, managerNotes?: string) => {
+    const target = events.find((e) => e.id === eventId);
+    if (!target) return;
+
+    const nowMs = TimeService.now();
+    const updatedEvent: MaintenanceEvent = {
+      ...target,
+      status: 'scheduled',
+      approvalNotes: managerNotes || target.approvalNotes,
+      updatedAt: nowMs,
+    };
+
+    const db = await getDB();
+    await db.put('events', updatedEvent);
+    setEvents((prev) => prev.map((e) => (e.id === eventId ? updatedEvent : e)));
+    await SyncEngine.queueMutation('events', 'update', eventId, updatedEvent as any);
+  };
+
+  // Cancel Event
+  const handleCancelEvent = async (eventId: string) => {
+    const target = events.find((e) => e.id === eventId);
+    if (!target) return;
+
+    const nowMs = TimeService.now();
+    const updatedEvent: MaintenanceEvent = {
+      ...target,
+      status: 'cancelled',
+      updatedAt: nowMs,
+    };
+
+    const db = await getDB();
+    await db.put('events', updatedEvent);
+    setEvents((prev) => prev.map((e) => (e.id === eventId ? updatedEvent : e)));
+    await SyncEngine.queueMutation('events', 'update', eventId, updatedEvent as any);
+  };
+
+  // Delete Event
+  const handleDeleteEvent = async (eventId: string) => {
+    const target = events.find((e) => e.id === eventId);
+    if (!target) return;
+
+    const nowMs = TimeService.now();
+    const updatedEvent: MaintenanceEvent = {
+      ...target,
+      isDeleted: true,
+      updatedAt: nowMs,
+    };
+
+    const db = await getDB();
+    await db.put('events', updatedEvent);
+    setEvents((prev) => prev.filter((e) => e.id !== eventId));
+    await SyncEngine.queueMutation('events', 'delete', eventId, { isDeleted: true });
   };
 
   // Manager Approve Event (Idempotent: advances schedule & deducts inventory exactly once)
@@ -441,8 +628,13 @@ export default function App() {
     await SyncEngine.queueMutation('subassets', 'delete', subAssetId, { isDeleted: true });
   };
 
-  // Save Schedule
+  // Save Schedule (Manager only)
   const handleSaveSchedule = async (scheduleData: Omit<MaintenanceSchedule, 'id' | 'updatedAt'>) => {
+    if (currentUser?.role !== 'manager') {
+      alert('تنها مدیر فنی و مهندسی مجاز به تعریف برنامه نگهداری و تعمیرات دوره‌ای می‌باشد.');
+      return;
+    }
+
     const db = await getDB();
     const newId = `sch-${Date.now()}`;
     const newSch: MaintenanceSchedule = {
@@ -453,6 +645,55 @@ export default function App() {
     await db.put('schedules', newSch);
     setSchedules((prev) => [...prev, newSch]);
     await SyncEngine.queueMutation('schedules', 'create', newId, newSch as any);
+  };
+
+  // Toggle Pause / Resume Schedule (Manager only)
+  const handleTogglePauseSchedule = async (scheduleId: string) => {
+    if (currentUser?.role !== 'manager') {
+      alert('تنها مدیر فنی مجاز به تغییر وضعیت برنامه نگهداری و تعمیرات می‌باشد.');
+      return;
+    }
+
+    const db = await getDB();
+    const target = schedules.find((s) => s.id === scheduleId);
+    if (!target) return;
+
+    const nowMs = TimeService.now();
+    const isCurrentlyPaused = target.status === 'paused';
+    const newStatus: 'active' | 'paused' = isCurrentlyPaused ? 'active' : 'paused';
+    const updatedSch: MaintenanceSchedule = {
+      ...target,
+      status: newStatus,
+      pausedAt: isCurrentlyPaused ? undefined : nowMs,
+      updatedAt: nowMs,
+    };
+
+    await db.put('schedules', updatedSch);
+    setSchedules((prev) => prev.map((s) => (s.id === scheduleId ? updatedSch : s)));
+    await SyncEngine.queueMutation('schedules', 'update', updatedSch.id, updatedSch as any);
+  };
+
+  // Delete / Remove Schedule (Manager only)
+  const handleDeleteSchedule = async (scheduleId: string) => {
+    if (currentUser?.role !== 'manager') {
+      alert('تنها مدیر فنی مجاز به حذف برنامه نگهداری و تعمیرات می‌باشد.');
+      return;
+    }
+
+    const db = await getDB();
+    const target = schedules.find((s) => s.id === scheduleId);
+    if (!target) return;
+
+    const nowMs = TimeService.now();
+    const updatedSch: MaintenanceSchedule = {
+      ...target,
+      isDeleted: true,
+      updatedAt: nowMs,
+    };
+
+    await db.put('schedules', updatedSch);
+    setSchedules((prev) => prev.filter((s) => s.id !== scheduleId));
+    await SyncEngine.queueMutation('schedules', 'delete', scheduleId, { isDeleted: true });
   };
 
   // Link Part to Asset
@@ -573,7 +814,9 @@ export default function App() {
     }
   };
 
-  const pendingApprovalsCount = events.filter((e) => e.status === 'pending_approval').length;
+  const pendingApprovalsCount = events.filter(
+    (e) => !e.isDeleted && (e.status === 'pending_approval' || e.status === 'pending_request')
+  ).length;
 
   return (
     <div className="min-h-screen flex flex-col bg-[#f3f3f3] text-slate-900 font-vazir" dir="rtl">
@@ -596,7 +839,7 @@ export default function App() {
         />
 
         {/* Viewport Area */}
-        <main className="flex-1 flex flex-col overflow-hidden">
+        <main className="flex-1 flex flex-col overflow-hidden pb-14 md:pb-0">
           {activeSection === 'dashboard' && (
             <DashboardView
               assets={assets}
@@ -620,11 +863,13 @@ export default function App() {
               onOpenCreateEvent={(assetId) => {
                 setPreselectedAssetId(assetId);
                 setPreselectedScheduleId(undefined);
+                setEditingEvent(null);
                 setIsEventModalOpen(true);
               }}
               onOpenCreateEventFromSchedule={(assetId, scheduleId) => {
                 setPreselectedAssetId(assetId);
                 setPreselectedScheduleId(scheduleId);
+                setEditingEvent(null);
                 setIsEventModalOpen(true);
               }}
               onOpenCreateSchedule={(assetId) => {
@@ -647,6 +892,19 @@ export default function App() {
               }}
               onDeleteAsset={handleDeleteAsset}
               onLinkPartToAsset={handleLinkPartToAsset}
+              onEditEvent={(event) => {
+                setEditingEvent(event);
+                setPreselectedAssetId(event.assetId);
+                setPreselectedScheduleId(event.affectedScheduleId || event.originatingScheduleId);
+                setIsEventModalOpen(true);
+              }}
+              onDeleteEvent={handleDeleteEvent}
+              onCancelEvent={handleCancelEvent}
+              onTogglePauseSchedule={handleTogglePauseSchedule}
+              onDeleteSchedule={handleDeleteSchedule}
+              onCompleteEvent={handleCompleteEvent}
+              onStartEvent={handleStartEvent}
+              onAuthorizeEvent={handleAuthorizeEvent}
             />
           )}
 
@@ -657,6 +915,8 @@ export default function App() {
               userRole={currentUser?.role}
               onOpenCreateEvent={(assetId) => {
                 setPreselectedAssetId(assetId);
+                setPreselectedScheduleId(undefined);
+                setEditingEvent(null);
                 setIsEventModalOpen(true);
               }}
               onOpenAddAsset={() => {
@@ -696,6 +956,7 @@ export default function App() {
               currentUser={currentUser}
               onApproveEvent={handleApproveEvent}
               onRejectEvent={handleRejectEvent}
+              onAuthorizeRequest={handleAuthorizeEvent}
             />
           )}
 
@@ -742,6 +1003,7 @@ export default function App() {
           setIsEventModalOpen(false);
           setPreselectedAssetId(undefined);
           setPreselectedScheduleId(undefined);
+          setEditingEvent(null);
         }}
         assets={assets}
         schedules={schedules}
@@ -749,6 +1011,7 @@ export default function App() {
         currentUser={currentUser}
         preselectedAssetId={preselectedAssetId}
         preselectedScheduleId={preselectedScheduleId}
+        initialEvent={editingEvent}
         onSaveEvent={handleSaveEvent}
       />
 

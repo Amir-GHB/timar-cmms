@@ -140,16 +140,56 @@ export function getJalaliFirstDayOfWeek(jy: number, jm: number): number {
   return (date.getDay() + 1) % 7;
 }
 
+export function parseIsoDateParts(dateStr: string): [number, number, number] | null {
+  if (!dateStr) return null;
+  const clean = dateStr.split('T')[0];
+  const parts = clean.split('-');
+  if (parts.length !== 3) return null;
+  const y = parseInt(parts[0], 10);
+  const m = parseInt(parts[1], 10);
+  const d = parseInt(parts[2], 10);
+  if (isNaN(y) || isNaN(m) || isNaN(d)) return null;
+  return [y, m, d];
+}
+
+export function isoToJalali(isoStr: string): [number, number, number] | null {
+  const parts = parseIsoDateParts(isoStr);
+  if (!parts) return null;
+  return gregorianToJalali(parts[0], parts[1], parts[2]);
+}
+
+export function jalaliToIso(jy: number, jm: number, jd: number): string {
+  const [gy, gm, gd] = jalaliToGregorian(jy, jm, jd);
+  const mm = gm < 10 ? `0${gm}` : `${gm}`;
+  const dd = gd < 10 ? `0${gd}` : `${gd}`;
+  return `${gy}-${mm}-${dd}`;
+}
+
 export function formatPersianDate(
   dateInput: string | Date,
   options?: { showMonthName?: boolean; separator?: string }
 ): string {
   if (!dateInput) return '-';
   try {
-    const d = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
-    if (isNaN(d.getTime())) return String(dateInput);
+    let gy: number, gm: number, gd: number;
+    if (typeof dateInput === 'string') {
+      const parts = parseIsoDateParts(dateInput);
+      if (parts) {
+        [gy, gm, gd] = parts;
+      } else {
+        const d = new Date(dateInput);
+        if (isNaN(d.getTime())) return String(dateInput);
+        gy = d.getFullYear();
+        gm = d.getMonth() + 1;
+        gd = d.getDate();
+      }
+    } else {
+      gy = dateInput.getFullYear();
+      gm = dateInput.getMonth() + 1;
+      gd = dateInput.getDate();
+    }
 
-    const [jy, jm, jd] = gregorianToJalali(d.getFullYear(), d.getMonth() + 1, d.getDate());
+    const [jy, jm, jd] = gregorianToJalali(gy, gm, gd);
 
     if (options?.showMonthName) {
       const monthName = PERSIAN_MONTH_NAMES[jm - 1];
@@ -170,6 +210,11 @@ export function getTodayJalali(): [number, number, number] {
   return gregorianToJalali(now.getFullYear(), now.getMonth() + 1, now.getDate());
 }
 
+export function getTodayIso(): string {
+  const [jy, jm, jd] = getTodayJalali();
+  return jalaliToIso(jy, jm, jd);
+}
+
 export function formatDualDate(
   dateInput: string | Date,
   calendarType: 'gregorian' | 'persian' = 'persian',
@@ -180,9 +225,59 @@ export function formatDualDate(
     return formatPersianDate(dateInput, { showMonthName: true });
   }
   try {
-    const d = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
-    return d.toISOString().split('T')[0];
+    if (typeof dateInput === 'string') {
+      return dateInput.split('T')[0];
+    }
+    return dateInput.toISOString().split('T')[0];
   } catch {
     return String(dateInput);
   }
+}
+
+/**
+ * Report Date Presets (strictly based on Persian Jalali calendar):
+ * - current_week: From Saturday of the current week through today
+ * - current_month: From 1st of the current Jalali month through today
+ * - last_6_months: From 6 Jalali months before today through today
+ * - last_year: From 1 Jalali year before today through today
+ */
+export function getReportPresetRanges(): {
+  currentWeek: { startIso: string; endIso: string };
+  currentMonth: { startIso: string; endIso: string };
+  last6Months: { startIso: string; endIso: string };
+  lastYear: { startIso: string; endIso: string };
+} {
+  const [jy, jm, jd] = getTodayJalali();
+  const todayIso = jalaliToIso(jy, jm, jd);
+
+  // Current Week: from Saturday through today
+  const [gy, gm, gd] = jalaliToGregorian(jy, jm, jd);
+  const jsDate = new Date(gy, gm - 1, gd);
+  const jalaliDayOfWeek = (jsDate.getDay() + 1) % 7; // 0 = Sat, 1 = Sun, ..., 6 = Fri
+  const satJsDate = new Date(gy, gm - 1, gd - jalaliDayOfWeek);
+  const startWeekIso = `${satJsDate.getFullYear()}-${String(satJsDate.getMonth() + 1).padStart(2, '0')}-${String(satJsDate.getDate()).padStart(2, '0')}`;
+
+  // Current Month: from day 1 through today
+  const startMonthIso = jalaliToIso(jy, jm, 1);
+
+  // Last 6 Months
+  let m6Year = jy;
+  let m6Month = jm - 6;
+  if (m6Month <= 0) {
+    m6Year -= 1;
+    m6Month += 12;
+  }
+  const maxDay6 = getJalaliMonthDays(m6Year, m6Month);
+  const start6MonthsIso = jalaliToIso(m6Year, m6Month, Math.min(jd, maxDay6));
+
+  // Last Year
+  const maxDayYear = getJalaliMonthDays(jy - 1, jm);
+  const startYearIso = jalaliToIso(jy - 1, jm, Math.min(jd, maxDayYear));
+
+  return {
+    currentWeek: { startIso: startWeekIso, endIso: todayIso },
+    currentMonth: { startIso: startMonthIso, endIso: todayIso },
+    last6Months: { startIso: start6MonthsIso, endIso: todayIso },
+    lastYear: { startIso: startYearIso, endIso: todayIso },
+  };
 }

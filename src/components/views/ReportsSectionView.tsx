@@ -14,11 +14,19 @@ import {
   FileText,
   CheckSquare,
   Square,
+  RotateCcw,
 } from 'lucide-react';
 import type { MaintenanceEvent, Asset, MaintenanceSchedule } from '../../types';
-import { formatPersianDate, toPersianDigits } from '../../utils/persianDate';
+import {
+  formatPersianDate,
+  toPersianDigits,
+  isoToJalali,
+  jalaliToIso,
+  getJalaliMonthDays,
+} from '../../utils/persianDate';
 import { TimeService } from '../../utils/timeService';
 import { EventDetailsModal } from '../maintenance/EventDetailsModal';
+import { PersianDatePicker } from '../common/PersianDatePicker';
 
 interface ReportsSectionViewProps {
   events: MaintenanceEvent[];
@@ -36,7 +44,9 @@ export const ReportsSectionView: React.FC<ReportsSectionViewProps> = ({
     assets.map((a) => a.id)
   );
   const [activeTab, setActiveTab] = useState<'all' | 'happened' | 'overdue'>('all');
-  const [activeDatePreset, setActiveDatePreset] = useState<string>('all');
+  const [activeDatePreset, setActiveDatePreset] = useState<'all' | 'week' | 'month' | 'last_month' | 'custom'>('all');
+  const [startDate, setStartDate] = useState<string>('');
+  const [endDate, setEndDate] = useState<string>('');
   const [inspectEvent, setInspectEvent] = useState<MaintenanceEvent | null>(null);
 
   const isAllAssetsSelected = selectedAssetIds.length === assets.length;
@@ -59,18 +69,74 @@ export const ReportsSectionView: React.FC<ReportsSectionViewProps> = ({
 
   const todayIso = TimeService.getTehranDateString();
 
-  // Reports only show what happened (completed) or what was supposed to happen and didn't happen / is overdue
+  // Handle Preset Selection: Current Week, Current Month, Last Month, All Time
+  const handleSelectPreset = (preset: 'all' | 'week' | 'month' | 'last_month') => {
+    setActiveDatePreset(preset);
+    const jToday = isoToJalali(todayIso);
+
+    if (preset === 'all') {
+      setStartDate('');
+      setEndDate('');
+      return;
+    }
+
+    if (preset === 'week') {
+      // In Iranian calendar, week starts on Saturday (شنبه) and ends on Friday (جمعه)
+      const now = new Date(todayIso + 'T00:00:00Z');
+      const dayOfWeek = (now.getUTCDay() + 1) % 7; // 0 for Saturday, 6 for Friday
+      const sat = new Date(now.getTime() - dayOfWeek * 86400000);
+      const fri = new Date(sat.getTime() + 6 * 86400000);
+      setStartDate(sat.toISOString().split('T')[0]);
+      setEndDate(fri.toISOString().split('T')[0]);
+      return;
+    }
+
+    if (preset === 'month') {
+      if (!jToday) return;
+      const [jy, jm] = jToday;
+      const start = jalaliToIso(jy, jm, 1);
+      const end = jalaliToIso(jy, jm, getJalaliMonthDays(jy, jm));
+      setStartDate(start);
+      setEndDate(end);
+      return;
+    }
+
+    if (preset === 'last_month') {
+      if (!jToday) return;
+      let [jy, jm] = jToday;
+      if (jm === 1) {
+        jy -= 1;
+        jm = 12;
+      } else {
+        jm -= 1;
+      }
+      const start = jalaliToIso(jy, jm, 1);
+      const end = jalaliToIso(jy, jm, getJalaliMonthDays(jy, jm));
+      setStartDate(start);
+      setEndDate(end);
+      return;
+    }
+  };
+
+  // Reports show what happened (completed) or overdue / uncompleted within selected assets and date range
   const relevantEvents = events.filter((e) => {
+    // 0. Exclude deleted events
+    if (e.isDeleted) return false;
+
     // 1. Asset Filter
     if (!selectedAssetIds.includes(e.assetId)) return false;
 
-    // 2. Happened: Completed
+    // 2. Date Range Filter
+    if (startDate && e.date < startDate) return false;
+    if (endDate && e.date > endDate) return false;
+
+    // 3. Happened: Completed
     const isHappened = e.status === 'completed';
 
-    // 3. Supposed to happen and didn't happen / overdue:
-    // Scheduled or pending or deadline passed without completion
+    // 4. Supposed to happen and didn't happen / overdue:
     const isOverdue =
       e.status !== 'completed' &&
+      e.status !== 'cancelled' &&
       ((e.deadlineDate && e.deadlineDate < todayIso) ||
         (e.date <= todayIso && e.status === 'scheduled') ||
         e.type === 'emergency');
@@ -80,12 +146,25 @@ export const ReportsSectionView: React.FC<ReportsSectionViewProps> = ({
     return isHappened || isOverdue;
   });
 
-  const happenedCount = events.filter((e) => e.status === 'completed').length;
-  const overdueCount = events.filter(
-    (e) =>
-      e.status !== 'completed' &&
-      ((e.deadlineDate && e.deadlineDate < todayIso) || (e.date <= todayIso && e.status === 'scheduled'))
-  ).length;
+  const happenedCount = events.filter((e) => {
+    if (e.isDeleted || e.status !== 'completed') return false;
+    if (!selectedAssetIds.includes(e.assetId)) return false;
+    if (startDate && e.date < startDate) return false;
+    if (endDate && e.date > endDate) return false;
+    return true;
+  }).length;
+
+  const overdueCount = events.filter((e) => {
+    if (e.isDeleted || e.status === 'completed' || e.status === 'cancelled') return false;
+    if (!selectedAssetIds.includes(e.assetId)) return false;
+    if (startDate && e.date < startDate) return false;
+    if (endDate && e.date > endDate) return false;
+    return (
+      (e.deadlineDate && e.deadlineDate < todayIso) ||
+      (e.date <= todayIso && e.status === 'scheduled') ||
+      e.type === 'emergency'
+    );
+  }).length;
 
   // Export CSV
   const handleExportCsv = () => {
@@ -209,6 +288,95 @@ export const ReportsSectionView: React.FC<ReportsSectionViewProps> = ({
               })}
             </div>
           </div>
+        </div>
+
+        {/* 
+          Date-Range Filter:
+          User Requirement: "In the Reports section's right-hand side panel, add a date-range filter directly below the asset checklist. Include: Start date, End date, Four preset buttons: Current Week, Current Month, Last Month, All Time"
+        */}
+        <div className="space-y-2.5 pt-3 border-t border-slate-200">
+          <div className="flex items-center justify-between">
+            <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+              <Calendar className="w-3.5 h-3.5 text-sky-600" />
+              <span>فیلتر بازه زمانی</span>
+            </label>
+            {(startDate || endDate) && (
+              <button
+                type="button"
+                onClick={() => handleSelectPreset('all')}
+                className="text-[10px] text-sky-700 hover:text-sky-900 font-semibold flex items-center gap-1 cursor-pointer"
+                title="پاک‌کردن فیلتر تاریخ"
+              >
+                <RotateCcw className="w-2.5 h-2.5" />
+                <span>حذف فیلتر</span>
+              </button>
+            )}
+          </div>
+
+          {/* 4 Preset Buttons */}
+          <div className="grid grid-cols-2 gap-1.5">
+            {[
+              { id: 'week', label: 'هفته جاری' },
+              { id: 'month', label: 'ماه جاری' },
+              { id: 'last_month', label: 'ماه گذشته' },
+              { id: 'all', label: 'همه زمان‌ها' },
+            ].map((p) => {
+              const isSelected = activeDatePreset === p.id;
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => handleSelectPreset(p.id as any)}
+                  className={`py-1.5 px-2 rounded-lg text-[11px] font-medium transition-colors cursor-pointer border text-center ${
+                    isSelected
+                      ? 'bg-sky-600 text-white border-sky-600 font-bold shadow-xs'
+                      : 'bg-slate-50 text-slate-700 hover:bg-slate-100 border-slate-200'
+                  }`}
+                >
+                  {p.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Start and End Date Pickers */}
+          <div className="space-y-2 pt-1">
+            <div>
+              <span className="block text-[11px] font-semibold text-slate-600 mb-1">
+                از تاریخ:
+              </span>
+              <PersianDatePicker
+                value={startDate}
+                onChange={(val) => {
+                  setStartDate(val);
+                  setActiveDatePreset('custom');
+                }}
+                placeholder="از تاریخ..."
+              />
+            </div>
+
+            <div>
+              <span className="block text-[11px] font-semibold text-slate-600 mb-1">
+                تا تاریخ:
+              </span>
+              <PersianDatePicker
+                value={endDate}
+                onChange={(val) => {
+                  setEndDate(val);
+                  setActiveDatePreset('custom');
+                }}
+                placeholder="تا تاریخ..."
+              />
+            </div>
+          </div>
+
+          {/* Active Date Indicator */}
+          {(startDate || endDate) && (
+            <div className="text-[10px] text-slate-500 bg-slate-50 p-1.5 rounded border border-slate-200/80 font-mono text-center">
+              بازه: {startDate ? formatPersianDate(startDate) : 'ابتدا'} تا{' '}
+              {endDate ? formatPersianDate(endDate) : 'اکنون'}
+            </div>
+          )}
         </div>
 
         {/* 

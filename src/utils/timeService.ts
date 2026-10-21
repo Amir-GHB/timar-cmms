@@ -198,34 +198,104 @@ export class TimeService {
   }
 
   /**
-   * Evaluates all active maintenance schedules against current Tehran date
-   * Generates automated PM events for due occurrences without advancing schedules.
+   * Evaluates all active maintenance schedules and events against current Tehran date.
+   * 1. Automatically transitions expired manual events to 'missed'.
+   * 2. Automatically transitions previous unresolved schedule occurrences to 'missed' when next interval arrives.
+   * 3. Generates new PM occurrences for current interval.
    */
   public static evaluateSchedules(
     schedules: MaintenanceSchedule[],
     existingEvents: MaintenanceEvent[]
   ): {
     newEvents: MaintenanceEvent[];
+    updatedEvents: MaintenanceEvent[];
     updatedSchedules: MaintenanceSchedule[];
   } {
     const todayTehran = this.getTehranDateString();
     const existingIds = new Set(existingEvents.map((e) => e.id));
     const newEvents: MaintenanceEvent[] = [];
+    const updatedEvents: MaintenanceEvent[] = [];
     const updatedSchedules: MaintenanceSchedule[] = [];
+    const nowMs = this.now();
 
+    // 1. Reconcile Expired Manual Events -> 'missed'
+    for (const evt of existingEvents) {
+      if (evt.isDeleted) continue;
+      // Completed, cancelled, and pending requests/approvals are NEVER marked missed
+      if (
+        evt.status === 'completed' ||
+        evt.status === 'cancelled' ||
+        evt.status === 'missed' ||
+        evt.status === 'pending_approval' ||
+        evt.status === 'pending_request'
+      ) {
+        continue;
+      }
+
+      const isManual = !evt.isAutomatedPM && !evt.originatingScheduleId;
+      if (isManual) {
+        const deadline = evt.deadlineDate || (evt.hasDeadline ? evt.date : '');
+        if (deadline && deadline < todayTehran) {
+          // Permitted maintenance window expired without completion -> missed
+          const missedEvt: MaintenanceEvent = {
+            ...evt,
+            status: 'missed',
+            updatedAt: nowMs,
+          };
+          updatedEvents.push(missedEvt);
+        }
+      }
+    }
+
+    // 2. Reconcile Recurring Schedules and Occurrences
     for (const sch of schedules) {
       if (sch.isDeleted) continue;
 
-      // Paused schedules must NOT generate events
+      // Paused schedules must NOT generate new events
       if (sch.status === 'paused') continue;
 
-      const isDueOrOverdue = sch.nextDueDate <= todayTehran;
-      const deterministicEventId = this.makeAutomatedEventId(sch.id, sch.nextDueDate);
-
-      // 1. Update schedule overdue status if needed
       let scheduleUpdated = false;
+      let currentNextDueDate = sch.nextDueDate;
+
+      // Check if the previous interval has arrived at its subsequent interval date
+      const subsequentIntervalDate = this.calculateNextDueDate(
+        currentNextDueDate,
+        sch.intervalType,
+        sch.intervalValue
+      );
+
+      if (todayTehran >= subsequentIntervalDate) {
+        // Find previous occurrence event for currentNextDueDate
+        const prevOccurrence = existingEvents.find(
+          (e) =>
+            !e.isDeleted &&
+            (e.originatingScheduleId === sch.id || e.id === this.makeAutomatedEventId(sch.id, currentNextDueDate)) &&
+            e.scheduleOccurrenceDate === currentNextDueDate
+        );
+
+        if (
+          prevOccurrence &&
+          (prevOccurrence.status === 'scheduled' || prevOccurrence.status === 'in_progress')
+        ) {
+          const missedOccurrence: MaintenanceEvent = {
+            ...prevOccurrence,
+            status: 'missed',
+            updatedAt: nowMs,
+          };
+          updatedEvents.push(missedOccurrence);
+        }
+
+        // Advance schedule's nextDueDate to the new interval
+        currentNextDueDate = subsequentIntervalDate;
+        scheduleUpdated = true;
+      }
+
+      const isDueOrOverdue = currentNextDueDate <= todayTehran;
+      const deterministicEventId = this.makeAutomatedEventId(sch.id, currentNextDueDate);
+
+      // Check overdue status of schedule
       let newStatus = sch.status;
-      if (isDueOrOverdue && sch.nextDueDate < todayTehran && sch.status !== 'overdue') {
+      if (isDueOrOverdue && currentNextDueDate < todayTehran && sch.status !== 'overdue') {
         newStatus = 'overdue';
         scheduleUpdated = true;
       } else if (!isDueOrOverdue && sch.status === 'overdue') {
@@ -233,18 +303,17 @@ export class TimeService {
         scheduleUpdated = true;
       }
 
-      // 2. Check if event for this occurrence already exists
+      // Check if event for this current occurrence already exists
       const alreadyHasEvent =
         existingIds.has(deterministicEventId) ||
+        (sch.lastGeneratedDueDate && sch.lastGeneratedDueDate === currentNextDueDate) ||
         existingEvents.some(
           (e) =>
-            !e.isDeleted &&
             (e.originatingScheduleId === sch.id || e.scheduleId === sch.id) &&
-            (e.scheduleOccurrenceDate === sch.nextDueDate || e.deadlineDate === sch.nextDueDate)
+            (e.scheduleOccurrenceDate === currentNextDueDate || e.deadlineDate === currentNextDueDate)
         );
 
       if (isDueOrOverdue && !alreadyHasEvent) {
-        // Create deterministic automated PM event
         const automatedEvent: MaintenanceEvent = {
           id: deterministicEventId,
           assetId: sch.assetId,
@@ -253,42 +322,42 @@ export class TimeService {
           title: `سرویس دوره‌ای PM: ${sch.taskTitle}`,
           type: 'preventive',
           status: 'scheduled',
-          date: sch.nextDueDate,
+          date: currentNextDueDate,
           hasDeadline: true,
-          deadlineDate: sch.nextDueDate,
+          deadlineDate: currentNextDueDate,
           originatingScheduleId: sch.id,
           scheduleId: sch.id,
-          scheduleOccurrenceDate: sch.nextDueDate,
-          affectedScheduleId: sch.id, // Reset this schedule on completion
+          scheduleOccurrenceDate: currentNextDueDate,
+          affectedScheduleId: sch.id,
           isAutomatedPM: true,
           sideEffectsApplied: false,
           technicianId: sch.assignedRole === 'technician' ? 'usr-2' : 'usr-1',
           technicianName: sch.assignedRole === 'technician' ? 'واحد تعمیرات مکانیک' : 'مدیر فنی',
-          durationHours: 1.5,
+          durationHours: 0,
           downtimeHours: 0,
           description: sch.description || `انجام بازرسی و سرویس دوره‌ای برنامه نت ${sch.taskTitle}`,
           partsUsed: [],
-          updatedAt: this.now(),
+          updatedAt: nowMs,
         };
 
         newEvents.push(automatedEvent);
         existingIds.add(deterministicEventId);
 
-        // Record lastGeneratedDueDate on schedule without advancing nextDueDate!
-        sch.lastGeneratedDueDate = sch.nextDueDate;
+        sch.lastGeneratedDueDate = currentNextDueDate;
         scheduleUpdated = true;
       }
 
       if (scheduleUpdated) {
         updatedSchedules.push({
           ...sch,
+          nextDueDate: currentNextDueDate,
           status: newStatus,
           lastGeneratedDueDate: sch.lastGeneratedDueDate,
-          updatedAt: this.now(),
+          updatedAt: nowMs,
         });
       }
     }
 
-    return { newEvents, updatedSchedules };
+    return { newEvents, updatedEvents, updatedSchedules };
   }
 }

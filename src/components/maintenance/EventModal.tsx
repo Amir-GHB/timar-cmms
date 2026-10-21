@@ -1,30 +1,31 @@
 import React, { useState, useEffect } from 'react';
 import {
   X,
+  Wrench,
+  Calendar,
+  Clock,
+  Package,
   Plus,
   Trash2,
-  Package,
-  Wrench,
   ShieldCheck,
-  Calendar,
   AlertTriangle,
-  Clock,
   Info,
   CalendarClock,
-  RotateCcw,
+  Edit,
 } from 'lucide-react';
 import type {
   Asset,
-  StoragePart,
   MaintenanceEvent,
   MaintenanceType,
   MaintenanceStatus,
-  MaintenanceSchedule,
+  StoragePart,
   UsedPart,
+  MaintenanceSchedule,
   User,
 } from '../../types';
-import { TimeService } from '../../utils/timeService';
 import { toPersianDigits } from '../../utils/persianDate';
+import { TimeService } from '../../utils/timeService';
+import { PersianDatePicker } from '../common/PersianDatePicker';
 
 interface EventModalProps {
   isOpen: boolean;
@@ -35,7 +36,11 @@ interface EventModalProps {
   currentUser: User | null;
   preselectedAssetId?: string;
   preselectedScheduleId?: string;
-  onSaveEvent: (event: Omit<MaintenanceEvent, 'id' | 'updatedAt'>) => void;
+  initialEvent?: MaintenanceEvent | null;
+  onSaveEvent: (
+    event: Omit<MaintenanceEvent, 'id' | 'updatedAt'>,
+    existingEventId?: string
+  ) => void;
 }
 
 export const EventModal: React.FC<EventModalProps> = ({
@@ -47,6 +52,7 @@ export const EventModal: React.FC<EventModalProps> = ({
   currentUser,
   preselectedAssetId,
   preselectedScheduleId,
+  initialEvent,
   onSaveEvent,
 }) => {
   const todayTehran = TimeService.getTehranDateString();
@@ -62,13 +68,33 @@ export const EventModal: React.FC<EventModalProps> = ({
   const [downtimeHours, setDowntimeHours] = useState('0.0');
   const [description, setDescription] = useState('');
   const [solution, setSolution] = useState('');
+  const [status, setStatus] = useState<MaintenanceStatus>('pending_request');
   const [usedParts, setUsedParts] = useState<UsedPart[]>([]);
 
   // Part adder state
   const [selectedPartId, setSelectedPartId] = useState('');
   const [partQty, setPartQty] = useState('1');
 
+  const isTech = currentUser?.role === 'technician';
+  const isEditing = !!initialEvent;
+
   useEffect(() => {
+    if (initialEvent) {
+      setAssetId(initialEvent.assetId);
+      setTitle(initialEvent.title);
+      setHasDeadline(initialEvent.hasDeadline ?? true);
+      setDeadlineDate(initialEvent.deadlineDate || todayTehran);
+      setAffectedScheduleId(initialEvent.affectedScheduleId || initialEvent.originatingScheduleId || '');
+      setDate(initialEvent.date || todayTehran);
+      setDurationHours(String(initialEvent.durationHours || 2.0));
+      setDowntimeHours(String(initialEvent.downtimeHours || 0.0));
+      setDescription(initialEvent.description || '');
+      setSolution(initialEvent.solution || '');
+      setStatus(initialEvent.status);
+      setUsedParts(initialEvent.partsUsed || []);
+      return;
+    }
+
     if (preselectedScheduleId) {
       const sch = schedules.find((s) => s.id === preselectedScheduleId);
       if (sch) {
@@ -79,15 +105,20 @@ export const EventModal: React.FC<EventModalProps> = ({
         setDate(sch.nextDueDate || todayTehran);
         setHasDeadline(true);
         setDeadlineDate(sch.nextDueDate || todayTehran);
+        setStatus('scheduled');
         return;
       }
     }
+
     if (preselectedAssetId) {
       setAssetId(preselectedAssetId);
     } else if (assets.length > 0 && !assetId) {
       setAssetId(assets[0].id);
     }
-  }, [preselectedAssetId, preselectedScheduleId, schedules, assets]);
+
+    // Default status for new manual requests
+    setStatus(isTech ? 'pending_request' : 'scheduled');
+  }, [isOpen, initialEvent, preselectedAssetId, preselectedScheduleId, schedules, assets, isTech]);
 
   if (!isOpen) return null;
 
@@ -122,48 +153,64 @@ export const EventModal: React.FC<EventModalProps> = ({
     const asset = assets.find((a) => a.id === assetId);
     if (!asset || !title) return;
 
-    const isTech = currentUser?.role === 'technician';
-    const finalStatus: MaintenanceStatus = isTech ? 'pending_approval' : 'completed';
-
-    // If no deadline, unofficially considered EM (Emergency Maintenance)
+    // Determine type
     const finalType: MaintenanceType = !hasDeadline
       ? 'emergency'
-      : affectedScheduleId
+      : (affectedScheduleId || initialEvent?.isAutomatedPM)
       ? 'preventive'
       : 'corrective';
 
-    onSaveEvent({
-      assetId: asset.id,
-      assetName: asset.name,
-      assetCode: asset.code,
-      title,
-      type: finalType,
-      status: finalStatus,
-      date,
-      hasDeadline,
-      deadlineDate: hasDeadline ? deadlineDate : undefined,
-      originatingScheduleId: affectedScheduleId || undefined,
-      scheduleId: affectedScheduleId || undefined,
-      scheduleOccurrenceDate: hasDeadline ? deadlineDate : undefined,
-      affectedScheduleId: affectedScheduleId || undefined,
-      isAutomatedPM: !!affectedScheduleId,
-      sideEffectsApplied: false,
-      isProvisionalTime: !TimeService.isServerTimeConfirmed(),
-      technicianId: currentUser?.id || 'usr-2',
-      technicianName: currentUser?.fullName || 'تکنسین عملیات',
-      durationHours: parseFloat(durationHours) || 0,
-      downtimeHours: parseFloat(downtimeHours) || 0,
-      description,
-      solution,
-      partsUsed: usedParts,
-      approvedBy: currentUser?.role === 'manager' ? currentUser.fullName : undefined,
-      approvalDate: currentUser?.role === 'manager' ? new Date().toISOString() : undefined,
-    });
+    // Status logic:
+    // If technician creating fresh manual request -> 'pending_request' (awaiting manager authorization)
+    // If technician executing schedule -> 'scheduled'
+    // If editing -> preserve status or use selected status
+    let finalStatus: MaintenanceStatus = status;
+    if (!isEditing) {
+      if (isTech) {
+        finalStatus = preselectedScheduleId ? 'scheduled' : 'pending_request';
+      } else {
+        finalStatus = status;
+      }
+    }
+
+    onSaveEvent(
+      {
+        assetId: asset.id,
+        assetName: asset.name,
+        assetCode: asset.code,
+        title,
+        type: finalType,
+        status: finalStatus,
+        date,
+        hasDeadline,
+        deadlineDate: hasDeadline ? deadlineDate : undefined,
+        originatingScheduleId:
+          initialEvent?.originatingScheduleId || affectedScheduleId || undefined,
+        scheduleId:
+          initialEvent?.scheduleId || affectedScheduleId || undefined,
+        scheduleOccurrenceDate:
+          initialEvent?.scheduleOccurrenceDate || (hasDeadline ? deadlineDate : undefined),
+        affectedScheduleId:
+          affectedScheduleId || initialEvent?.affectedScheduleId || undefined,
+        isAutomatedPM: initialEvent?.isAutomatedPM || !!affectedScheduleId,
+        sideEffectsApplied: initialEvent?.sideEffectsApplied ?? false,
+        isProvisionalTime: !TimeService.isServerTimeConfirmed(),
+        technicianId: initialEvent?.technicianId || currentUser?.id || 'usr-2',
+        technicianName: initialEvent?.technicianName || currentUser?.fullName || 'تکنسین عملیات',
+        durationHours: parseFloat(durationHours) || 0,
+        downtimeHours: parseFloat(downtimeHours) || 0,
+        description,
+        solution,
+        partsUsed: usedParts,
+        approvedBy: initialEvent?.approvedBy,
+        approvalNotes: initialEvent?.approvalNotes,
+        approvalDate: initialEvent?.approvalDate,
+      },
+      initialEvent?.id
+    );
 
     onClose();
   };
-
-  const isTech = currentUser?.role === 'technician';
 
   return (
     <div
@@ -179,13 +226,30 @@ export const EventModal: React.FC<EventModalProps> = ({
         <div className="flex items-center justify-between px-6 py-4 bg-slate-50 border-b border-slate-100">
           <div>
             <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
-              <Wrench className="w-4 h-4 text-sky-600" />
-              {isTech ? 'ثبت و ارسال درخواست گزارش کار' : 'ثبت رویداد و دستورکار فنی'}
+              {isEditing ? (
+                <>
+                  <Edit className="w-4 h-4 text-sky-600" />
+                  <span>ویرایش رویداد و دستورکار فنی</span>
+                </>
+              ) : (
+                <>
+                  <Wrench className="w-4 h-4 text-sky-600" />
+                  <span>
+                    {isTech
+                      ? preselectedScheduleId
+                        ? 'ثبت دستورکار برگرفته از برنامه نت'
+                        : 'ثبت درخواست جدید نگهداری و تعمیرات'
+                      : 'صدور دستورکار و رویداد فنی'}
+                  </span>
+                </>
+              )}
             </h2>
             <p className="text-xs text-slate-500">
-              {isTech
-                ? 'گزارش شما پس از ثبت، برای بررسی به کارتابل مدیر ارسال می‌شود'
-                : 'ثبت مستقیم با اختیار تایید نهایی و به‌روزرسانی برنامه‌های PM'}
+              {isEditing
+                ? 'مشخصات دستورکار را ویرایش نمایید (ارتباط با برنامه نت حفظ می‌شود)'
+                : isTech
+                ? 'درخواست شما برای بررسی و صدور مجوز کار به کارتابل مدیر ارسال می‌شود'
+                : 'تعریف دستورکار برنامه‌ریزی‌شده یا ثبت مستقیم کار انجام‌شده'}
             </p>
           </div>
           <button
@@ -198,15 +262,27 @@ export const EventModal: React.FC<EventModalProps> = ({
 
         {/* Form Body */}
         <form onSubmit={handleSubmit} className="p-6 space-y-4 text-xs font-vazir max-h-[75vh] overflow-y-auto">
+          {/* Schedule link indicator */}
+          {(initialEvent?.originatingScheduleId || affectedScheduleId) && (
+            <div className="p-3 bg-indigo-50 rounded-xl border border-indigo-200 text-indigo-950 text-[11px] leading-relaxed flex items-center gap-2">
+              <CalendarClock className="w-4 h-4 text-indigo-600 shrink-0" />
+              <span>
+                این رویداد به <strong>برنامه نت پیشگیرانه (PM)</strong> متصل است. با تکمیل معتبر آن، دوره برنامه به‌روزرسانی خواهد شد.
+              </span>
+            </div>
+          )}
+
           {/* PM / EM Explanation Banner */}
           <div className="p-3 bg-sky-50 rounded-xl border border-sky-200/80 text-sky-950 text-[11px] leading-relaxed flex items-start gap-2">
             <Info className="w-4 h-4 text-sky-600 shrink-0 mt-0.5" />
             <div>
-              <strong>راهنمای انواع رویدادها (PM و EM):</strong>
+              <strong>راهنمای گردش‌کار و انواع رویداد:</strong>
               <div className="mt-0.5 text-slate-600">
-                • رویدادهای سفارشی دارای مهلت به عنوان اقدامات برنامه‌ریزی‌شده و رویدادهای بدون مهلت به عنوان <strong>تعمیرات اضطراری و رفع خرابی (EM)</strong> تلقی می‌شوند.
+                • رویدادهای بدون مهلت به عنوان <strong>تعمیرات اضطراری (EM)</strong> و رویدادهای دارای مهلت به عنوان اقدامات برنامه‌ریزی‌شده تلقی می‌شوند.
                 <br />
-                • در صورت انتخاب برنامه PM مرتبط، با تکمیل رویداد، موعد برنامه به تاریخ اجرا ریست می‌شود.
+                {isTech && !isEditing && (
+                  <span>• درخواست ثبت‌شده پس از تایید مدیر، به دستورکار فعال تبدیل شده و امکان ثبت پایان کار فعال می‌گردد.</span>
+                )}
               </div>
             </div>
           </div>
@@ -221,7 +297,8 @@ export const EventModal: React.FC<EventModalProps> = ({
                   setAssetId(e.target.value);
                   setAffectedScheduleId('');
                 }}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white"
+                disabled={isEditing}
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white disabled:bg-slate-100"
               >
                 {assets.map((a) => (
                   <option key={a.id} value={a.id}>
@@ -250,126 +327,127 @@ export const EventModal: React.FC<EventModalProps> = ({
               مهلت انجام و وضعیت اضطراری
             </label>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <label className="flex items-center gap-2 p-2 rounded-lg bg-white border border-slate-200 cursor-pointer">
+            <div className="flex items-center gap-6">
+              <label className="flex items-center gap-2 cursor-pointer font-medium text-slate-700">
                 <input
                   type="radio"
                   name="deadlineType"
                   checked={hasDeadline}
                   onChange={() => setHasDeadline(true)}
-                  className="text-sky-600"
+                  className="text-sky-600 focus:ring-sky-500"
                 />
-                <div>
-                  <span className="font-bold text-slate-800 block text-xs">دارای مهلت انجام مشخص</span>
-                  <span className="text-[10px] text-slate-500">اقدام زمان‌بندی‌شده دوره‌ای یا اصلاحی</span>
-                </div>
+                <span>دارای موعد مقرر (برنامه‌ریزی‌شده PM یا اصلاحی)</span>
               </label>
 
-              <label className="flex items-center gap-2 p-2 rounded-lg bg-white border border-slate-200 cursor-pointer">
+              <label className="flex items-center gap-2 cursor-pointer font-medium text-slate-700">
                 <input
                   type="radio"
                   name="deadlineType"
                   checked={!hasDeadline}
                   onChange={() => setHasDeadline(false)}
-                  className="text-rose-600"
+                  className="text-rose-600 focus:ring-rose-500"
                 />
-                <div>
-                  <span className="font-bold text-rose-700 block text-xs">بدون مهلت (تعمیر اضطراری - EM)</span>
-                  <span className="text-[10px] text-slate-500">خرابی غیرمترقبه نیازمند رفع عیب فوری</span>
-                </div>
+                <span className="text-rose-700 font-bold">بدون مهلت - تعمیرات اضطراری (EM)</span>
               </label>
             </div>
 
             {hasDeadline && (
-              <div className="pt-2 flex items-center gap-3">
-                <span className="text-slate-600 text-xs font-medium">تاریخ سررسید مهلت:</span>
-                <input
-                  type="date"
-                  value={deadlineDate}
-                  onChange={(e) => setDeadlineDate(e.target.value)}
-                  className="px-3 py-1.5 border border-slate-300 rounded-lg font-mono text-xs bg-white"
-                />
+              <div className="pt-2 border-t border-slate-200/60 flex flex-col sm:flex-row sm:items-center gap-2">
+                <label className="text-xs font-semibold text-slate-600 shrink-0">
+                  مهلت انجام کار (Deadline):
+                </label>
+                <div className="w-full sm:w-64">
+                  <PersianDatePicker
+                    value={deadlineDate}
+                    onChange={setDeadlineDate}
+                    placeholder="انتخاب مهلت انجام..."
+                  />
+                </div>
               </div>
             )}
           </div>
 
-          {/* Affected Schedule Selection (Reset upon completion) */}
-          <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="block font-bold text-slate-800 flex items-center gap-1.5">
-                <CalendarClock className="w-3.5 h-3.5 text-sky-600" />
-                برنامه نت پیشگیرانه (PM) مرتبط جهت تمدید و ریست دوره:
-              </label>
-              {affectedScheduleId && (
-                <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 flex items-center gap-1">
-                  <RotateCcw className="w-3 h-3" />
-                  دوره تکرار ریست خواهد شد
-                </span>
-              )}
-            </div>
-
-            {currentAssetSchedules.length === 0 ? (
-              <div className="text-[11px] text-slate-400">
-                برنامه PM ثبت‌شده‌ای برای این تجهیز تعریف نشده است.
+          {/* Affected Maintenance Schedule (Optional) */}
+          {currentAssetSchedules.length > 0 && (
+            <div className="p-3 bg-indigo-50/50 rounded-xl border border-indigo-100 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="font-bold text-indigo-900 flex items-center gap-1.5">
+                  <CalendarClock className="w-3.5 h-3.5 text-indigo-600" />
+                  اتصال به برنامه نگهداری پیشگیرانه تجهیز (PM)
+                </label>
+                <span className="text-[11px] text-indigo-600">اختیاری</span>
               </div>
-            ) : (
+              <p className="text-[11px] text-slate-600">
+                در صورت انتخاب، با تایید نهایی این رویداد، تاریخ برنامه انتخاب‌شده به‌روزرسانی می‌شود.
+              </p>
               <select
                 value={affectedScheduleId}
                 onChange={(e) => setAffectedScheduleId(e.target.value)}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white font-vazir text-xs"
+                className="w-full px-3 py-2 border border-indigo-200 rounded-lg bg-white text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500"
               >
-                <option value="">-- بدون انتساب به برنامه دوره‌ای (رویداد مستقل) --</option>
+                <option value="">-- بدون وابستگی به برنامه نت دوره‌ای --</option>
                 {currentAssetSchedules.map((sch) => (
                   <option key={sch.id} value={sch.id}>
-                    {sch.taskTitle} (هر {toPersianDigits(sch.intervalValue)}{' '}
+                    برنامه: {sch.taskTitle} (دوره: {toPersianDigits(sch.intervalValue)}{' '}
                     {sch.intervalType === 'months'
                       ? 'ماه'
                       : sch.intervalType === 'weeks'
                       ? 'هفته'
-                      : sch.intervalType === 'hours'
-                      ? 'ساعت'
-                      : 'روز'})
+                      : sch.intervalType === 'days'
+                      ? 'روز'
+                      : 'ساعت'}
+                    )
                   </option>
                 ))}
               </select>
-            )}
-          </div>
+            </div>
+          )}
 
-          {/* Metrics & Dates */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {/* Manager Direct Status Selection (Only for manager creating/editing) */}
+          {!isTech && (
+            <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between">
+              <div>
+                <span className="font-bold text-slate-800 block">وضعیت گردش‌کار دستورکار:</span>
+                <span className="text-[11px] text-slate-500">
+                  می‌توانید دستورکار را برای انجام برنامه‌ریزی کنید یا مستقیماً به عنوان کار تکمیل‌شده ثبت نمایید.
+                </span>
+              </div>
+              <select
+                value={status}
+                onChange={(e) => setStatus(e.target.value as MaintenanceStatus)}
+                className="px-3 py-1.5 border border-slate-300 rounded-lg bg-white font-bold text-xs"
+              >
+                <option value="scheduled">برنامه‌ریزی‌شده - آماده اجرا (Scheduled)</option>
+                <option value="in_progress">در حال انجام (In Progress)</option>
+                <option value="pending_approval">در انتظار تایید اتمام کار</option>
+                <option value="completed">تایید و تکمیل‌شده (Completed)</option>
+                <option value="rejected">نیازمند اصلاح (Rejected)</option>
+                <option value="cancelled">لغو شده (Cancelled)</option>
+              </select>
+            </div>
+          )}
+
+          {/* Date & Downtime (hour-technician removed as requested in Section 4) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label className="block font-bold text-slate-700 mb-1">تاریخ انجام اقدام</label>
-              <input
-                type="date"
+              <PersianDatePicker
+                label="تاریخ ثبت / اقدام"
                 required
                 value={date}
-                onChange={(e) => setDate(e.target.value)}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white font-mono"
+                onChange={setDate}
               />
             </div>
 
             <div>
-              <label className="block font-bold text-slate-700 mb-1">مدت کارکرد تکنسین (ساعت)</label>
-              <input
-                type="number"
-                step="0.5"
-                min="0.5"
-                required
-                value={durationHours}
-                onChange={(e) => setDurationHours(e.target.value)}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono"
-              />
-            </div>
-
-            <div>
-              <label className="block font-bold text-slate-700 mb-1">توقف خط تصفیه‌خانه (ساعت)</label>
+              <label className="block font-bold text-slate-700 mb-1">مدت توقف خط تصفیه‌خانه (ساعت)</label>
               <input
                 type="number"
                 step="0.5"
                 min="0"
                 value={downtimeHours}
                 onChange={(e) => setDowntimeHours(e.target.value)}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono"
+                placeholder="0"
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono text-xs"
               />
             </div>
           </div>
@@ -377,31 +455,32 @@ export const EventModal: React.FC<EventModalProps> = ({
           {/* Description */}
           <div>
             <label className="block font-bold text-slate-700 mb-1">
-              شرح وضعیت، شواهد عیب و مشاهدات تکنسین
+              شرح وضعیت، عیب یا دستورکار مورد نظر:
             </label>
             <textarea
-              rows={2}
-              required
-              placeholder="توضیح در مورد لرزش، دبی، نشتی یا چک‌لیست سرویس..."
+              rows={3}
+              placeholder="شرح شواهد فنی، نشانه‌های بروز عیب یا دستورالعمل اجرای کار..."
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               className="w-full p-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-sky-500"
             />
           </div>
 
-          {/* Solution */}
-          <div>
-            <label className="block font-bold text-slate-700 mb-1">
-              اقدامات انجام‌شده و راه‌حل نهایی
-            </label>
-            <textarea
-              rows={2}
-              placeholder="شرح قطعات تعویض‌شده، نتایج روانکاری یا تست راه‌اندازی..."
-              value={solution}
-              onChange={(e) => setSolution(e.target.value)}
-              className="w-full p-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-sky-500"
-            />
-          </div>
+          {/* Solution / Actions (if already performed) */}
+          {(status === 'completed' || isEditing) && (
+            <div>
+              <label className="block font-bold text-slate-700 mb-1">
+                اقدامات انجام‌شده، تعمیر و راه‌اندازی:
+              </label>
+              <textarea
+                rows={2}
+                placeholder="شرح عملیات انجام شده در صورت اتمام کار..."
+                value={solution}
+                onChange={(e) => setSolution(e.target.value)}
+                className="w-full p-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-sky-500"
+              />
+            </div>
+          )}
 
           {/* Consumed Spare Parts */}
           <div className="pt-2 border-t border-slate-100">
@@ -486,7 +565,13 @@ export const EventModal: React.FC<EventModalProps> = ({
               className="px-5 py-2 text-xs font-bold text-white bg-sky-700 hover:bg-sky-600 rounded-lg shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
             >
               <ShieldCheck className="w-4 h-4" />
-              <span>{isTech ? 'ارسال درخواست تایید به مدیر' : 'ثبت و تایید دستورکار'}</span>
+              <span>
+                {isEditing
+                  ? 'ذخیره تغییرات رویداد'
+                  : isTech
+                  ? 'ارسال درخواست به کارتابل مدیر'
+                  : 'ثبت و صدور دستورکار'}
+              </span>
             </button>
           </div>
         </form>

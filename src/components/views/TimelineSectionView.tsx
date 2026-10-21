@@ -12,8 +12,9 @@ export const TimelineSectionView: React.FC<TimelineSectionViewProps> = ({ events
   const [filterType, setFilterType] = useState<string>('all');
   const [inspectEvent, setInspectEvent] = useState<MaintenanceEvent | null>(null);
 
-  const filteredEvents = [...events]
+  const filteredEvents = events
     .filter((e) => {
+      if (e.isDeleted) return false;
       if (filterType === 'all') return true;
       if (filterType === 'emergency') return e.type === 'emergency' || (!e.hasDeadline && e.type !== 'preventive');
       return e.type === filterType;

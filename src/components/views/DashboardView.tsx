@@ -47,14 +47,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const lowStockCount = inventory.filter((i) => i.quantityInStock <= i.minThreshold).length;
 
   // Build event calendar dots
-  const calendarDots: CalendarEventDot[] = events.map((e) => ({
-    date: e.date,
-    color: e.type === 'emergency' ? '#ef4444' : e.status === 'completed' ? '#10b981' : '#f59e0b',
-    title: e.title,
-  }));
+  const calendarDots: CalendarEventDot[] = events
+    .filter((e) => !e.isDeleted)
+    .map((e) => ({
+      date: e.date,
+      color: e.type === 'emergency' ? '#ef4444' : e.status === 'completed' ? '#10b981' : '#f59e0b',
+      title: e.title,
+    }));
 
   // Recent 5 events
-  const recentEvents = [...events]
+  const recentEvents = events
+    .filter((e) => !e.isDeleted)
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
     .slice(0, 5);
 

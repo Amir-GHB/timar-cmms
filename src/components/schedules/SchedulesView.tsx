@@ -3,6 +3,8 @@ import {
   CalendarClock,
   Plus,
   Play,
+  Pause,
+  Trash2,
   Clock,
   Calendar,
   AlertTriangle,
@@ -25,8 +27,10 @@ interface SchedulesViewProps {
   userRole?: Role;
   calendarType: CalendarType;
   language: Language;
-  onExecuteSchedule: (schedule: MaintenanceSchedule) => void;
+  onExecuteSchedule?: (schedule: MaintenanceSchedule) => void;
   onSaveSchedule?: (schedule: Partial<MaintenanceSchedule>) => void;
+  onTogglePauseSchedule?: (scheduleId: string) => void;
+  onDeleteSchedule?: (scheduleId: string) => void;
 }
 
 export const SchedulesView: React.FC<SchedulesViewProps> = ({
@@ -37,6 +41,8 @@ export const SchedulesView: React.FC<SchedulesViewProps> = ({
   language,
   onExecuteSchedule,
   onSaveSchedule,
+  onTogglePauseSchedule,
+  onDeleteSchedule,
 }) => {
   const [showAddModal, setShowAddModal] = useState(false);
   const [assetId, setAssetId] = useState(assets[0]?.id || '');
@@ -157,24 +163,64 @@ export const SchedulesView: React.FC<SchedulesViewProps> = ({
                   <td className="px-4 py-3">
                     <span
                       className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase ${
-                        isOverdue
+                        sch.status === 'paused'
+                          ? 'bg-slate-100 text-slate-700 border border-slate-200'
+                          : isOverdue
                           ? 'bg-rose-100 text-rose-800 border border-rose-200'
                           : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
                       }`}
                     >
-                      {sch.status}
+                      {sch.status === 'paused' ? 'Paused' : sch.status}
                     </span>
                   </td>
 
                   <td className="px-4 py-3 text-right">
-                    <button
-                      onClick={() => onExecuteSchedule(sch)}
-                      className="px-3 py-1.5 text-xs font-semibold text-sky-700 bg-sky-50 hover:bg-sky-100 rounded-md transition-colors inline-flex items-center gap-1 cursor-pointer"
-                      title="Execute this maintenance task and submit report"
-                    >
-                      <Play className="w-3 h-3" />
-                      <span>Execute</span>
-                    </button>
+                    {userRole === 'manager' ? (
+                      <div className="flex items-center justify-end gap-1.5">
+                        {onTogglePauseSchedule && (
+                          <button
+                            type="button"
+                            onClick={() => onTogglePauseSchedule(sch.id)}
+                            className={`px-2 py-1 text-xs font-semibold rounded-md transition-colors inline-flex items-center gap-1 cursor-pointer border ${
+                              sch.status === 'paused'
+                                ? 'text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border-emerald-200'
+                                : 'text-amber-700 bg-amber-50 hover:bg-amber-100 border-amber-200'
+                            }`}
+                            title={sch.status === 'paused' ? 'Resume Schedule' : 'Pause Schedule'}
+                          >
+                            {sch.status === 'paused' ? (
+                              <>
+                                <Play className="w-3 h-3" />
+                                <span>Resume</span>
+                              </>
+                            ) : (
+                              <>
+                                <Pause className="w-3 h-3" />
+                                <span>Pause</span>
+                              </>
+                            )}
+                          </button>
+                        )}
+
+                        {onDeleteSchedule && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (confirm('Are you sure you want to remove this recurring schedule? Historical events will be preserved.')) {
+                                onDeleteSchedule(sch.id);
+                              }
+                            }}
+                            className="px-2 py-1 text-xs font-semibold text-rose-600 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-md transition-colors inline-flex items-center gap-1 cursor-pointer"
+                            title="Remove Schedule"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            <span>Remove</span>
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="text-slate-400 text-[11px]">View only</span>
+                    )}
                   </td>
                 </tr>
               );

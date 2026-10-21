@@ -21,6 +21,7 @@ interface RequestsSectionViewProps {
   currentUser: UserType | null;
   onApproveEvent: (eventId: string, approvalNotes: string) => void;
   onRejectEvent: (eventId: string, revisionNotes: string) => void;
+  onAuthorizeRequest?: (eventId: string, managerNotes?: string) => void;
 }
 
 export const RequestsSectionView: React.FC<RequestsSectionViewProps> = ({
@@ -29,13 +30,16 @@ export const RequestsSectionView: React.FC<RequestsSectionViewProps> = ({
   currentUser,
   onApproveEvent,
   onRejectEvent,
+  onAuthorizeRequest,
 }) => {
   const [filterStatus, setFilterStatus] = useState<'pending' | 'all' | 'completed' | 'rejected'>('pending');
   const [managerNotes, setManagerNotes] = useState('');
 
   // Requests submitted by technicians
   const requestEvents = events.filter((e) => {
-    if (filterStatus === 'pending') return e.status === 'pending_approval';
+    if (filterStatus === 'pending') {
+      return e.status === 'pending_approval' || e.status === 'pending_request';
+    }
     if (filterStatus === 'completed') return e.status === 'completed';
     if (filterStatus === 'rejected') return e.status === 'rejected';
     return true; // all
@@ -48,18 +52,24 @@ export const RequestsSectionView: React.FC<RequestsSectionViewProps> = ({
   const selectedEvent =
     requestEvents.find((e) => e.id === selectedEventId) || requestEvents[0];
 
-  const pendingCount = events.filter((e) => e.status === 'pending_approval').length;
+  const pendingCount = events.filter(
+    (e) => e.status === 'pending_approval' || e.status === 'pending_request'
+  ).length;
 
   const handleApprove = () => {
     if (!selectedEvent) return;
-    onApproveEvent(selectedEvent.id, managerNotes || 'تایید شد و در سوابق نهایی تجهیز ثبت گردید.');
+    if (selectedEvent.status === 'pending_request') {
+      onAuthorizeRequest?.(selectedEvent.id, managerNotes || 'درخواست تایید و دستورکار صادر گردید.');
+    } else {
+      onApproveEvent(selectedEvent.id, managerNotes || 'تایید شد و در سوابق نهایی تجهیز ثبت گردید.');
+    }
     setManagerNotes('');
   };
 
   const handleReject = () => {
     if (!selectedEvent) return;
     if (!managerNotes.trim()) {
-      alert('لطفاً دلیل درخواست بازبینی یا اصلاحات مورد نیاز را در کادر یادداشت مدیر وارد نمایید.');
+      alert('لطفاً دلیل درخواست بازبینی یا رد درخواست را در کادر یادداشت مدیر وارد نمایید.');
       return;
     }
     onRejectEvent(selectedEvent.id, managerNotes);
@@ -164,6 +174,8 @@ export const RequestsSectionView: React.FC<RequestsSectionViewProps> = ({
                       className={`text-[9px] font-bold px-1.5 py-0.2 rounded ${
                         evt.status === 'completed'
                           ? 'bg-emerald-50 text-emerald-700'
+                          : evt.status === 'pending_request'
+                          ? 'bg-sky-100 text-sky-800'
                           : evt.status === 'pending_approval'
                           ? 'bg-amber-100 text-amber-800'
                           : 'bg-rose-50 text-rose-700'
@@ -171,6 +183,8 @@ export const RequestsSectionView: React.FC<RequestsSectionViewProps> = ({
                     >
                       {evt.status === 'completed'
                         ? 'تایید شده'
+                        : evt.status === 'pending_request'
+                        ? 'درخواست جدید'
                         : evt.status === 'pending_approval'
                         ? 'در انتظار تایید'
                         : 'نیازمند اصلاح'}
@@ -197,6 +211,8 @@ export const RequestsSectionView: React.FC<RequestsSectionViewProps> = ({
                       className={`text-[10px] font-bold px-2 py-0.5 rounded ${
                         selectedEvent.status === 'completed'
                           ? 'bg-emerald-100 text-emerald-800'
+                          : selectedEvent.status === 'pending_request'
+                          ? 'bg-sky-100 text-sky-800 border border-sky-300'
                           : selectedEvent.status === 'pending_approval'
                           ? 'bg-amber-100 text-amber-800'
                           : 'bg-rose-100 text-rose-800'
@@ -204,6 +220,8 @@ export const RequestsSectionView: React.FC<RequestsSectionViewProps> = ({
                     >
                       {selectedEvent.status === 'completed'
                         ? 'تایید نهایی شده'
+                        : selectedEvent.status === 'pending_request'
+                        ? 'درخواست کار جدید - در انتظار بررسی و صدور دستورکار'
                         : selectedEvent.status === 'pending_approval'
                         ? 'در انتظار بررسی مدیر'
                         : 'نیازمند اصلاح توسط تکنسین'}
@@ -339,14 +357,22 @@ export const RequestsSectionView: React.FC<RequestsSectionViewProps> = ({
                       className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition-colors cursor-pointer"
                     >
                       <XCircle className="w-4 h-4" />
-                      <span>درخواست بازبینی و اصلاح</span>
+                      <span>
+                        {selectedEvent.status === 'pending_request'
+                          ? 'رد یا لغو درخواست'
+                          : 'درخواست بازبینی و اصلاح'}
+                      </span>
                     </button>
                     <button
                       onClick={handleApprove}
                       className="flex items-center gap-1.5 px-5 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 rounded-lg shadow-xs transition-colors cursor-pointer"
                     >
                       <CheckCircle2 className="w-4 h-4" />
-                      <span>تایید و نهایی‌سازی دستورکار</span>
+                      <span>
+                        {selectedEvent.status === 'pending_request'
+                          ? 'تایید و صدور دستورکار (آماده اجرا)'
+                          : 'تایید و نهایی‌سازی دستورکار'}
+                      </span>
                     </button>
                   </div>
                 ) : (
