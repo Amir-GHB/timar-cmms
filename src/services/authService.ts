@@ -52,6 +52,8 @@ export class AuthService {
    */
   public static async init(_scriptUrl?: string): Promise<User | null> {
     try {
+      // Remove any persisted token-based session from earlier app versions.
+      localStorage.removeItem('timar_auth_session');
       const stored = localStorage.getItem(AUTH_USER_STORAGE_KEY);
       if (!stored) {
         this.activeUser = null;
