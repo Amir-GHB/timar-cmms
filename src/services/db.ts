@@ -52,7 +52,7 @@ interface TimarDB extends DBSchema {
 }
 
 const DB_NAME = 'timar_cmms_db';
-const DB_VERSION = 2; // Upgraded for authentic Persian dataset
+const DB_VERSION = 3; // Keep compatibility with browsers already upgraded by the token experiment
 
 let dbPromise: Promise<IDBPDatabase<TimarDB>> | null = null;
 
