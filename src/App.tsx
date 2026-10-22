@@ -162,7 +162,7 @@ export default function App() {
 
       setPendingCount(queueCount);
 
-      // Authenticate via secure session token
+      // Restore the locally cached authenticated user
       const authUser = await AuthService.init(scriptUrl);
       if (authUser) {
         setCurrentUser(authUser);
