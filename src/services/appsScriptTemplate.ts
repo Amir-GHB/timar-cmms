@@ -3,9 +3,9 @@
  * Users paste this into Google Sheets -> Extensions -> Apps Script.
  * 
  * Implements:
- * - Username/password authentication and tokenless client authorization (temporary)
- * - Salted password hashing and legacy plaintext password auto-migration
- * - Manager-only authorization for user creation, role changes, and schedule mutation
+ * - Username/password authentication and salted password hashing
+ * - Legacy plaintext password auto-migration
+ * - TEMPORARY: manager role checks are client-supplied and are not secure authorization
  * - Race-safe username uniqueness enforcement using LockService
  * - Credential exclusion from synchronization responses and audit logs
  * - Automated daily PM schedule evaluation at midnight Tehran time
