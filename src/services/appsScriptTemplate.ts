@@ -3,7 +3,7 @@
  * Users paste this into Google Sheets -> Extensions -> Apps Script.
  * 
  * Implements:
- * - Authoritative server-side session authentication & token validation
+ * - Username/password authentication and tokenless client authorization (temporary)
  * - Salted password hashing and legacy plaintext password auto-migration
  * - Manager-only authorization for user creation, role changes, and schedule mutation
  * - Race-safe username uniqueness enforcement using LockService
@@ -20,7 +20,6 @@ export const APPS_SCRIPT_CODE = `/**
  */
 
 var TEHRAN_TZ = "Asia/Tehran";
-var SESSION_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 function getTehranDateString(dateObj) {
   var d = dateObj || new Date();
@@ -103,20 +102,6 @@ function verifyPasswordServer(password, storedHash) {
   return false;
 }
 
-function hashTokenServer(token) {
-  var hashBytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(token), Utilities.Charset.UTF_8);
-  var hex = "";
-  for (var i = 0; i < hashBytes.length; i++) {
-    var b = hashBytes[i] < 0 ? hashBytes[i] + 256 : hashBytes[i];
-    var h = b.toString(16);
-    hex += (h.length === 1 ? "0" + h : h);
-  }
-  return hex;
-}
-
-function generateSecureTokenServer() {
-  return Utilities.getUuid().replace(/-/g, "") + Utilities.getUuid().replace(/-/g, "");
-}
 
 // ============================================================================
 // DATABASE & RELATIONAL SHEETS SETUP
@@ -128,9 +113,6 @@ function setupSheets() {
   var schemas = {
     "Users": [
       "id", "username", "passwordHash", "fullName", "role", "department", "isActive", "updatedAt"
-    ],
-    "Sessions": [
-      "id", "tokenHash", "userId", "username", "role", "createdAt", "expiresAt", "isRevoked"
     ],
     "Assets": [
       "id", "name", "code", "parentId", "category", "status", "serialNumber",
@@ -251,109 +233,6 @@ function logSecurityEvent(ss, eventType, username, status, details) {
 }
 
 // ============================================================================
-// SERVER SESSION MANAGEMENT & AUTHORIZATION
-// ============================================================================
-
-function createSessionRecord(ss, user) {
-  var sessionSheet = ss.getSheetByName("Sessions");
-  if (!sessionSheet) return null;
-
-  var token = generateSecureTokenServer();
-  var tokenHash = hashTokenServer(token);
-  var now = new Date().getTime();
-  var expiresAt = now + SESSION_DURATION_MS;
-  var sessionId = "sess-" + now + "-" + Utilities.getUuid().substring(0, 4);
-
-  sessionSheet.appendRow([
-    sessionId, tokenHash, user.id, user.username, user.role, now, expiresAt, false
-  ]);
-
-  return {
-    sessionToken: token,
-    expiresAt: expiresAt
-  };
-}
-
-function validateSessionToken(ss, token) {
-  if (!token) return null;
-  var sessionSheet = ss.getSheetByName("Sessions");
-  var userSheet = ss.getSheetByName("Users");
-  if (!sessionSheet || !userSheet) return null;
-
-  var tokenHash = hashTokenServer(token);
-  var sessionRows = sessionSheet.getDataRange().getValues();
-  var now = new Date().getTime();
-
-  var foundSession = null;
-  for (var s = 1; s < sessionRows.length; s++) {
-    var row = sessionRows[s];
-    if (String(row[1]) === tokenHash) {
-      var isRevoked = !!row[7];
-      var expiresAt = parseInt(row[6], 10) || 0;
-      if (!isRevoked && expiresAt > now) {
-        foundSession = {
-          userId: String(row[2]),
-          role: String(row[4])
-        };
-        break;
-      }
-    }
-  }
-
-  if (!foundSession) return null;
-
-  // Authoritatively load user from Users table
-  var userRows = userSheet.getDataRange().getValues();
-  for (var u = 1; u < userRows.length; u++) {
-    var uRow = userRows[u];
-    if (String(uRow[0]) === foundSession.userId) {
-      var isActive = !!uRow[6];
-      if (!isActive) return null; // Disabled account
-      return {
-        id: String(uRow[0]),
-        username: String(uRow[1]),
-        fullName: String(uRow[3]),
-        role: String(uRow[4]),
-        department: String(uRow[5]),
-        isActive: isActive,
-        updatedAt: parseInt(uRow[7], 10) || 0
-      };
-    }
-  }
-
-  return null;
-}
-
-function revokeSessionToken(ss, token) {
-  if (!token) return;
-  var sessionSheet = ss.getSheetByName("Sessions");
-  if (!sessionSheet) return;
-
-  var tokenHash = hashTokenServer(token);
-  var sessionRows = sessionSheet.getDataRange().getValues();
-
-  for (var s = 1; s < sessionRows.length; s++) {
-    if (String(sessionRows[s][1]) === tokenHash) {
-      sessionSheet.getRange(s + 1, 8).setValue(true); // isRevoked = true
-      break;
-    }
-  }
-}
-
-function revokeAllUserSessions(ss, userId) {
-  if (!userId) return;
-  var sessionSheet = ss.getSheetByName("Sessions");
-  if (!sessionSheet) return;
-
-  var sessionRows = sessionSheet.getDataRange().getValues();
-  for (var s = 1; s < sessionRows.length; s++) {
-    if (String(sessionRows[s][2]) === String(userId)) {
-      sessionSheet.getRange(s + 1, 8).setValue(true);
-    }
-  }
-}
-
-// ============================================================================
 // REQUEST ROUTING (doGet & doPost)
 // ============================================================================
 
@@ -441,35 +320,20 @@ function doPost(e) {
       });
     }
 
-    // 2. Validate Session
-    if (action === "validateSession") {
-      var validUser = validateSessionToken(ss, payload.sessionToken);
-      if (validUser) {
-        return jsonResponse({ success: true, user: validUser });
-      }
-      return jsonResponse({ success: false, error: "Invalid or expired session" });
-    }
-
-    // 3. Logout
-    if (action === "logout") {
-      revokeSessionToken(ss, payload.sessionToken);
-      return jsonResponse({ success: true });
-    }
-
-    // 4. Create User (Manager only, race-safe username uniqueness)
+    // 2. Create User (temporary client-side manager check; no session tokens)
     if (action === "createUser") {
-      var actingMgr = validateSessionToken(ss, payload.sessionToken);
+      var actingMgr = payload.actingUser;
       if (!actingMgr || actingMgr.role !== "manager") {
-        logSecurityEvent(ss, "UNAUTHORIZED_USER_CREATE", actingMgr ? actingMgr.username : "anonymous", "BLOCKED", "");
+        logSecurityEvent(ss, "UNAUTHORIZED_USER_CREATE", actingMgr ? actingMgr.username : "anonymous", "BLOCKED", "Client-side manager identity missing");
         return jsonResponse({ success: false, error: "دسترسی غیرمجاز: تنها مدیر سیستم مجاز به ایجاد حساب کاربری است." });
       }
       var createRes = handleCreateUser(ss, payload.userData, actingMgr);
       return jsonResponse(createRes);
     }
 
-    // 5. Update User (Manager only)
+    // 3. Update User (temporary client-side manager check; no session tokens)
     if (action === "updateUser") {
-      var actingMgr = validateSessionToken(ss, payload.sessionToken);
+      var actingMgr = payload.actingUser;
       if (!actingMgr || actingMgr.role !== "manager") {
         return jsonResponse({ success: false, error: "دسترسی غیرمجاز: تنها مدیر سیستم مجاز به ویرایش کاربر است." });
       }
@@ -477,9 +341,9 @@ function doPost(e) {
       return jsonResponse(updateRes);
     }
 
-    // 6. Reset Password (Manager only)
+    // 4. Reset Password (temporary client-side manager check; no session tokens)
     if (action === "resetPassword") {
-      var actingMgr = validateSessionToken(ss, payload.sessionToken);
+      var actingMgr = payload.actingUser;
       if (!actingMgr || actingMgr.role !== "manager") {
         return jsonResponse({ success: false, error: "دسترسی غیرمجاز: تنها مدیر سیستم مجاز به بازنشانی رمز عبور است." });
       }
@@ -487,25 +351,25 @@ function doPost(e) {
       return jsonResponse(resetRes);
     }
 
-    // 7. Secure syncPush (Requires valid session, enforces role-based mutation authority)
+    // 5. Tokenless sync endpoints. Role is supplied by the client and is not
+    // authoritative; restore server-verified authorization in a later step.
     if (action === "syncPush") {
-      var actingUser = validateSessionToken(ss, payload.sessionToken);
-      if (!actingUser) {
-        logSecurityEvent(ss, "SYNC_PUSH_REJECTED", "anonymous", "BLOCKED", "Missing or invalid session token");
-        return jsonResponse({ error: "Unauthorized: A valid session token is required." });
-      }
+      var actingUser = payload.actingUser || {
+        username: payload.clientUser || "Unknown",
+        fullName: payload.clientUser || "Unknown",
+        role: "technician"
+      };
       var pushResult = applyMutations(ss, payload.mutations || [], actingUser);
       processDueSchedules();
       return jsonResponse(pushResult);
     }
 
-    // 8. Secure syncFull (Requires valid session)
     if (action === "syncFull") {
-      var actingUser = validateSessionToken(ss, payload.sessionToken);
-      if (!actingUser) {
-        logSecurityEvent(ss, "SYNC_FULL_REJECTED", "anonymous", "BLOCKED", "Missing or invalid session token");
-        return jsonResponse({ error: "Unauthorized: A valid session token is required." });
-      }
+      var actingUser = payload.actingUser || {
+        username: payload.clientUser || "Unknown",
+        fullName: payload.clientUser || "Unknown",
+        role: "technician"
+      };
       var pushRes = applyMutations(ss, payload.mutations || [], actingUser);
       processDueSchedules();
       var delta = pullDeltaChanges(ss, payload.sinceTimestamp || 0);
@@ -564,13 +428,10 @@ function handleLogin(ss, username, password) {
           updatedAt: parseInt(row[7], 10) || new Date().getTime()
         };
 
-        var sessionInfo = createSessionRecord(ss, safeUser);
         logSecurityEvent(ss, "LOGIN_SUCCESS", username, "OK", "");
 
         return {
           success: true,
-          sessionToken: sessionInfo.sessionToken,
-          expiresAt: sessionInfo.expiresAt,
           user: safeUser
         };
       } else {
@@ -680,9 +541,6 @@ function handleUpdateUser(ss, targetUserId, updates, actingMgr) {
   if (updates.department !== undefined) sheet.getRange(rowIndex, 6).setValue(String(updates.department).trim());
   if (updates.isActive !== undefined) {
     sheet.getRange(rowIndex, 7).setValue(!!updates.isActive);
-    if (!updates.isActive) {
-      revokeAllUserSessions(ss, targetUserId);
-    }
   }
   sheet.getRange(rowIndex, 8).setValue(now);
 
@@ -716,7 +574,6 @@ function handleResetPassword(ss, targetUserId, newPassword, actingMgr) {
       var pHash = hashPasswordServer(newPassword);
       sheet.getRange(i + 1, 3).setValue(pHash);
       sheet.getRange(i + 1, 8).setValue(new Date().getTime());
-      revokeAllUserSessions(ss, targetUserId);
       logSecurityEvent(ss, "PASSWORD_RESET", data[i][1], "OK", "Reset by " + actingMgr.username);
       return { success: true };
     }
