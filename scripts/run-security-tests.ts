@@ -74,7 +74,7 @@ async function runTests() {
   }
 
   // --- Suite 2: Canonical Username Normalization & Validation ---
-  console.log('\n3. Canonical Username Normalization & Validation:');
+  console.log('\n2. Canonical Username Normalization & Validation:');
   {
     const rawUser1 = '  Manager.Operator  ';
     const rawUser2 = 'manager.operator';
@@ -97,7 +97,7 @@ async function runTests() {
   }
 
   // --- Suite 3: Password Strength Policy (Minimum 12 Characters) ---
-  console.log('\n4. Password Strength Policy Enforcement:');
+  console.log('\n3. Password Strength Policy Enforcement:');
   {
     const weakShort = validatePasswordStrength('Short#1');
     const weakSimple = validatePasswordStrength('alllowercasecharacters12');
@@ -109,7 +109,7 @@ async function runTests() {
   }
 
   // --- Suite 4: Persian (Jalali) Report Date Presets Calculation ---
-  console.log('\n5. Persian (Jalali) Report Date Presets Calculations:');
+  console.log('\n4. Persian (Jalali) Report Date Presets Calculations:');
   {
     // Test known reference dates
     // 1404/08/15 (15 Aban 1404) -> 6 months ago is 1404/02/15 (15 Ordibehesht 1404)
@@ -176,7 +176,7 @@ async function runTests() {
   }
 
   // --- Suite 5: Manager Role Protection Rules ---
-  console.log('\n6. Manager Role Protection & Deactivation Safeguards:');
+  console.log('\n5. Manager Role Protection & Deactivation Safeguards:');
   {
     const mockUsers = [
       { id: 'usr-1', username: 'manager', role: 'manager' as const, isActive: true },
@@ -195,7 +195,7 @@ async function runTests() {
   }
 
   // --- Suite 6: Backend URL Configuration & Persian RTL Error Validation ---
-  console.log('\n7. Backend URL Configuration & Persian RTL Error Validation:');
+  console.log('\n6. Backend URL Configuration & Persian RTL Error Validation:');
   {
     assert(
       isValidAppsScriptUrl(DEFAULT_APPS_SCRIPT_URL) === true,
