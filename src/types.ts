@@ -3,12 +3,39 @@ export type Role = 'manager' | 'technician';
 export interface User {
   id: string;
   username: string;
-  password?: string;
   fullName: string;
   role: Role;
   department: string;
   isActive: boolean;
   updatedAt: number;
+}
+
+export interface UserCredential {
+  userId: string;
+  usernameNormalized: string;
+  passwordHash: string;
+  updatedAt: number;
+}
+
+export interface AuthSession {
+  token: string;
+  user: User;
+  expiresAt: number;
+  createdAt: number;
+  /** True only when this token was issued by and validated against the cloud server. */
+  serverAuthenticated?: boolean;
+}
+
+export interface SessionRecord {
+  id: string;
+  tokenHash: string;
+  userId: string;
+  username: string;
+  role: Role;
+  createdAt: number;
+  expiresAt: number;
+  isRevoked: boolean;
+  lastActivityAt?: number;
 }
 
 export type AssetCategory =
