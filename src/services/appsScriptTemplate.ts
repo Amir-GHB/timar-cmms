@@ -256,7 +256,20 @@ function logSecurityEvent(ss, eventType, username, status, details) {
 
 function createSessionRecord(ss, user) {
   var sessionSheet = ss.getSheetByName("Sessions");
-  if (!sessionSheet) return null;
+
+  // Recover safely if the Sessions sheet was not created in the deployed spreadsheet.
+  // Do not call setupSheets() here: it also performs broader database initialization.
+  if (!sessionSheet) {
+    sessionSheet = ss.insertSheet("Sessions");
+  }
+
+  var headers = ["id", "tokenHash", "userId", "username", "role", "createdAt", "expiresAt", "isRevoked"];
+  if (sessionSheet.getLastRow() === 0) {
+    sessionSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sessionSheet.getRange(1, 1, 1, headers.length)
+      .setFontWeight("bold").setBackground("#0284c7").setFontColor("#ffffff");
+    sessionSheet.setFrozenRows(1);
+  }
 
   var token = generateSecureTokenServer();
   var tokenHash = hashTokenServer(token);
@@ -564,7 +577,25 @@ function handleLogin(ss, username, password) {
           updatedAt: parseInt(row[7], 10) || new Date().getTime()
         };
 
-        var sessionInfo = createSessionRecord(ss, safeUser);
+        var sessionInfo;
+        try {
+          sessionInfo = createSessionRecord(ss, safeUser);
+        } catch (sessionError) {
+          logSecurityEvent(ss, "LOGIN_FAILED", username, "ERROR", "Session creation failed: " + sessionError.toString());
+          return {
+            success: false,
+            message: "ورود انجام نشد؛ ایجاد نشست امن روی سرور ناموفق بود. لطفاً وجود و دسترسی برگه Sessions را بررسی کنید."
+          };
+        }
+
+        if (!sessionInfo || !sessionInfo.sessionToken || !sessionInfo.expiresAt) {
+          logSecurityEvent(ss, "LOGIN_FAILED", username, "ERROR", "Session creation returned no session");
+          return {
+            success: false,
+            message: "ورود انجام نشد؛ نشست امن سرور ایجاد نشد. لطفاً برگه Sessions را بررسی کنید."
+          };
+        }
+
         logSecurityEvent(ss, "LOGIN_SUCCESS", username, "OK", "");
 
         return {
