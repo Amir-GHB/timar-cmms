@@ -28,7 +28,6 @@ import { ScheduleModal } from './components/schedules/ScheduleModal';
 import { LoginModal } from './components/auth/LoginModal';
 import { OfflineIndicator } from './components/common/OfflineIndicator';
 import { TimeService } from './utils/timeService';
-import { AuthService } from './services/authService';
 import { DEFAULT_APPS_SCRIPT_URL } from './config/constants';
 
 export default function App() {
@@ -110,17 +109,9 @@ export default function App() {
     }
   };
 
-  // Refresh user accounts from local store
-  const refreshUsers = async () => {
-    const db = await getDB();
-    const loadedUsers = await db.getAll('users');
-    setAvailableUsers(loadedUsers);
-  };
-
   // Load state on startup
   useEffect(() => {
     let unsubscribeSync: (() => void) | null = null;
-    let unsubscribeAuth: (() => void) | null = null;
     let evalInterval: any = null;
 
     async function loadData() {
@@ -134,6 +125,7 @@ export default function App() {
         loadedEvents,
         loadedSchedules,
         loadedInventory,
+        activeUserSetting,
         urlSetting,
         queueCount,
       ] = await Promise.all([
@@ -143,6 +135,7 @@ export default function App() {
         db.getAll('events'),
         db.getAll('schedules'),
         db.getAll('inventory'),
+        db.get('settings', 'currentUser'),
         db.get('settings', 'appsScriptUrl'),
         db.count('syncQueue'),
       ]);
@@ -154,29 +147,18 @@ export default function App() {
       setSchedules(loadedSchedules.filter((s) => !s.isDeleted));
       setInventory(loadedInventory.filter((i) => !i.isDeleted));
 
-      const scriptUrl =
-        typeof urlSetting?.value === 'string' && urlSetting.value.trim()
-          ? urlSetting.value.trim()
-          : DEFAULT_APPS_SCRIPT_URL;
-      setAppsScriptUrl(scriptUrl);
-
-      setPendingCount(queueCount);
-
-      // Authenticate via secure session token
-      const authUser = await AuthService.init(scriptUrl);
-      if (authUser) {
-        setCurrentUser(authUser);
-        AuthService.validateServerSession(scriptUrl).catch(() => {});
-      } else {
-        setCurrentUser(null);
+      if (activeUserSetting?.value) {
+        setCurrentUser(activeUserSetting.value as User);
+      } else if (loadedUsers.length > 0) {
+        setCurrentUser(loadedUsers[0]);
       }
 
-      unsubscribeAuth = AuthService.subscribe((u) => {
-        setCurrentUser(u);
-        if (!u) {
-          setIsLoginModalOpen(true);
-        }
-      });
+      const scriptUrl = typeof urlSetting?.value === 'string' ? urlSetting.value : '';
+      if (scriptUrl) {
+        setAppsScriptUrl(scriptUrl);
+      }
+
+      setPendingCount(queueCount);
 
       // Subscribe to sync notifications
       unsubscribeSync = SyncEngine.subscribe((st, count) => {
@@ -202,7 +184,6 @@ export default function App() {
 
     return () => {
       if (unsubscribeSync) unsubscribeSync();
-      if (unsubscribeAuth) unsubscribeAuth();
       if (evalInterval) clearInterval(evalInterval);
     };
   }, []);
@@ -241,24 +222,11 @@ export default function App() {
     await evaluateActiveSchedules();
   };
 
-  // Secure session login / logout handlers
-  const handleLoginSuccess = (user: User) => {
+  // User profile switch
+  const handleSelectUser = async (user: User) => {
     setCurrentUser(user);
-    setIsLoginModalOpen(false);
-  };
-
-  const handleLogout = async () => {
-    await AuthService.logout(appsScriptUrl);
-    setCurrentUser(null);
-    setIsLoginModalOpen(true);
-  };
-
-  const handleSelectSection = (section: MainSection) => {
-    if (!currentUser && section !== 'settings') {
-      setIsLoginModalOpen(true);
-      return;
-    }
-    setActiveSection(section);
+    const db = await getDB();
+    await db.put('settings', { key: 'currentUser', value: user });
   };
 
   // Save Apps Script URL
@@ -867,7 +835,7 @@ export default function App() {
         {/* Navigation Panel */}
         <NavigationPanel
           activeSection={activeSection}
-          onSelectSection={handleSelectSection}
+          onSelectSection={setActiveSection}
           pendingApprovalsCount={pendingApprovalsCount}
         />
 
@@ -881,7 +849,7 @@ export default function App() {
               inventory={inventory}
               syncStatus={syncStatus}
               pendingApprovalsCount={pendingApprovalsCount}
-              onNavigateToTab={handleSelectSection}
+              onNavigateToTab={(sec) => setActiveSection(sec)}
             />
           )}
 
@@ -1010,11 +978,8 @@ export default function App() {
               onTriggerSync={handleTriggerSync}
               isSyncing={isSyncing}
               currentUser={currentUser}
-              users={availableUsers}
-              onUsersUpdated={refreshUsers}
               onExportBackup={handleExportBackup}
               onImportBackup={handleImportBackup}
-              onOpenLogin={() => setIsLoginModalOpen(true)}
             />
           )}
         </main>
@@ -1023,21 +988,13 @@ export default function App() {
       {/* Offline Status Banner */}
       <OfflineIndicator pendingCount={pendingCount} />
 
-      {/* Login & Profile Modal */}
+      {/* Login & Profile Switcher Modal */}
       <LoginModal
-        isOpen={isLoginModalOpen || (!currentUser && activeSection !== 'settings')}
-        onClose={() => {
-          setIsLoginModalOpen(false);
-        }}
+        isOpen={isLoginModalOpen}
+        onClose={() => setIsLoginModalOpen(false)}
         currentUser={currentUser}
-        onLoginSuccess={handleLoginSuccess}
-        onLogout={handleLogout}
-        scriptUrl={appsScriptUrl}
-        isMandatory={!currentUser && activeSection !== 'settings'}
-        onOpenSettings={() => {
-          setActiveSection('settings');
-          setIsLoginModalOpen(false);
-        }}
+        onSelectUser={handleSelectUser}
+        availableUsers={availableUsers}
       />
 
       {/* Event Creation & Work Order Modal */}
