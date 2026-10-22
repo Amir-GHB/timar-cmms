@@ -12,9 +12,15 @@ import {
   ShieldCheck,
   Database,
   Check,
+  Lock,
+  LogIn,
+  AlertTriangle,
+  Info,
 } from 'lucide-react';
 import type { User } from '../../types';
 import { APPS_SCRIPT_CODE } from '../../services/appsScriptTemplate';
+import { UserManagementPanel } from '../settings/UserManagementPanel';
+import { getUrlValidationError, isValidAppsScriptUrl } from '../../config/constants';
 
 interface SettingsSectionViewProps {
   appsScriptUrl: string;
@@ -23,8 +29,11 @@ interface SettingsSectionViewProps {
   onTriggerSync: () => void;
   isSyncing: boolean;
   currentUser: User | null;
+  users?: User[];
+  onUsersUpdated?: () => Promise<void>;
   onExportBackup: () => void;
   onImportBackup: (jsonContent: string) => Promise<{ success: boolean; message: string }>;
+  onOpenLogin?: () => void;
 }
 
 export const SettingsSectionView: React.FC<SettingsSectionViewProps> = ({
@@ -34,8 +43,11 @@ export const SettingsSectionView: React.FC<SettingsSectionViewProps> = ({
   onTriggerSync,
   isSyncing,
   currentUser,
+  users = [],
+  onUsersUpdated,
   onExportBackup,
   onImportBackup,
+  onOpenLogin,
 }) => {
   const [urlInput, setUrlInput] = useState(appsScriptUrl);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
@@ -44,11 +56,23 @@ export const SettingsSectionView: React.FC<SettingsSectionViewProps> = ({
   const [copiedCode, setCopiedCode] = useState(false);
   const [importStatus, setImportStatus] = useState<string | null>(null);
 
+  const isAuthenticated = Boolean(currentUser);
+
   const handleSaveAndTest = async () => {
-    onSaveScriptUrl(urlInput.trim());
+    const trimmed = urlInput.trim();
+    const validationError = getUrlValidationError(trimmed);
+    if (validationError) {
+      setTestResult({
+        success: false,
+        message: validationError,
+      });
+      return;
+    }
+
+    onSaveScriptUrl(trimmed);
     setIsTesting(true);
     setTestResult(null);
-    const res = await onTestConnection(urlInput.trim());
+    const res = await onTestConnection(trimmed);
     setIsTesting(false);
     setTestResult(res);
   };
@@ -64,6 +88,7 @@ export const SettingsSectionView: React.FC<SettingsSectionViewProps> = ({
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!isAuthenticated) return;
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -81,22 +106,50 @@ export const SettingsSectionView: React.FC<SettingsSectionViewProps> = ({
 
   return (
     <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 bg-[#fafafa]" dir="rtl">
-      <div>
-        <h1 className="text-lg md:text-xl font-bold text-slate-900 flex items-center gap-2">
-          <Settings className="w-5 h-5 text-sky-600" />
-          تنظیمات سیستم و همگام‌سازی ابری
-        </h1>
-        <p className="text-xs text-slate-500">
-          پیکربندی اتصال به گوگل اپ اسکریپت، پشتیبان‌گیری فایل JSON و مدیریت دسترسی‌ها
-        </p>
+      {/* Header with Title and Login Action if unauthenticated */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <h1 className="text-lg md:text-xl font-bold text-slate-900 flex items-center gap-2">
+            <Settings className="w-5 h-5 text-sky-600" />
+            تنظیمات سیستم و همگام‌سازی ابری
+          </h1>
+          <p className="text-xs text-slate-500">
+            {isAuthenticated
+              ? 'پیکربندی اتصال به گوگل اپ اسکریپت، پشتیبان‌گیری فایل JSON و مدیریت دسترسی‌ها'
+              : 'پیکربندی اولیه آدرس سرور ابری و دسترسی به کدهای Code.gs قبل از ورود'}
+          </p>
+        </div>
+
+        {!isAuthenticated && onOpenLogin && (
+          <button
+            onClick={onOpenLogin}
+            className="px-4 py-2 text-xs font-bold text-white bg-sky-700 hover:bg-sky-600 rounded-xl shadow-xs transition-colors flex items-center justify-center gap-2 cursor-pointer shrink-0 self-start sm:self-auto"
+          >
+            <LogIn className="w-4 h-4" />
+            <span>ورود به حساب کاربری</span>
+          </button>
+        )}
       </div>
 
+      {/* Pre-login info banner */}
+      {!isAuthenticated && (
+        <div className="bg-sky-50 border border-sky-200 rounded-xl p-4 text-xs text-sky-900 flex items-start gap-3 shadow-2xs">
+          <Info className="w-5 h-5 text-sky-600 shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <div className="font-bold">دسترسی پیش از ورود (Pre-Login Setup)</div>
+            <p className="leading-relaxed text-sky-800">
+              در این وضعیت، تنها بخش <strong className="font-bold">اتصال به سرور ابری (Web App URL)</strong> و <strong className="font-bold">مشاهده کدهای Code.gs</strong> فعال است تا بتوانید سامانه را پیش از ورود پیکربندی نمایید. سایر بخش‌های دارای اطلاعات حساس (پشتیبان‌گیری و مدیریت کاربران) نیازمند احراز هویت معتبر می‌باشند.
+            </p>
+          </div>
+        </div>
+      )}
+
       <div className="max-w-4xl space-y-6">
-        {/* Google Apps Script Card */}
+        {/* Google Apps Script Card (ALWAYS FULLY INTERACTIVE) */}
         <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-4">
-          <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-100 gap-2">
             <div className="flex items-center gap-2.5">
-              <Cloud className="w-5 h-5 text-sky-600" />
+              <Cloud className="w-5 h-5 text-sky-600 shrink-0" />
               <div>
                 <h2 className="text-sm font-bold text-slate-900">
                   اتصال به سرور ابری (Google Apps Script & Sheets)
@@ -109,7 +162,7 @@ export const SettingsSectionView: React.FC<SettingsSectionViewProps> = ({
 
             <button
               onClick={() => setShowCodeModal(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-sky-700 bg-sky-50 hover:bg-sky-100 rounded-lg transition-colors cursor-pointer"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-sky-700 bg-sky-50 hover:bg-sky-100 rounded-lg transition-colors cursor-pointer self-start sm:self-auto"
             >
               <Code2 className="w-3.5 h-3.5" />
               <span>مشاهده و کپی کدهای `Code.gs`</span>
@@ -127,7 +180,8 @@ export const SettingsSectionView: React.FC<SettingsSectionViewProps> = ({
                   placeholder="https://script.google.com/macros/s/AKfycb.../exec"
                   value={urlInput}
                   onChange={(e) => setUrlInput(e.target.value)}
-                  className="flex-1 w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500 bg-white"
+                  dir="ltr"
+                  className="flex-1 w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500 bg-white text-left"
                 />
 
                 <div className="flex items-center gap-2 w-full sm:w-auto">
@@ -156,6 +210,9 @@ export const SettingsSectionView: React.FC<SettingsSectionViewProps> = ({
                   </button>
                 </div>
               </div>
+              <p className="text-[11px] text-slate-400 mt-1">
+                آدرس پیش‌فرض سامانه با پسوند <code className="font-mono text-sky-700">/exec</code> تعریف شده و در صورت نیاز به نسخه جدید ابری قابل ویرایش است.
+              </p>
             </div>
 
             {testResult && (
@@ -182,70 +239,141 @@ export const SettingsSectionView: React.FC<SettingsSectionViewProps> = ({
           </div>
         </div>
 
-        {/* Local JSON Migration & Backup */}
-        <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-4">
-          <div className="flex items-center gap-2 pb-3 border-b border-slate-100">
-            <Database className="w-5 h-5 text-sky-600" />
-            <div>
-              <h2 className="text-sm font-bold text-slate-900">
-                پشتیبان‌گیری محلی و انتقال اطلاعات (`timar_data.json`)
-              </h2>
-              <p className="text-[11px] text-slate-500">
-                کاملاً سازگار با نسخه دسکتاپ C++ Qt تیمار جهت خروجی گرفتن و بازیابی بدون نیاز به اینترنت
-              </p>
+        {/* Local JSON Migration & Backup (VISIBLY DISABLED BEFORE LOGIN) */}
+        <div
+          className={`bg-white rounded-xl border p-5 shadow-xs space-y-4 relative ${
+            isAuthenticated
+              ? 'border-slate-200'
+              : 'border-dashed border-slate-300 bg-slate-50/50'
+          }`}
+        >
+          <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+            <div className="flex items-center gap-2">
+              <Database className={`w-5 h-5 ${isAuthenticated ? 'text-sky-600' : 'text-slate-400'}`} />
+              <div>
+                <h2 className="text-sm font-bold text-slate-900">
+                  پشتیبان‌گیری محلی و انتقال اطلاعات (`timar_data.json`)
+                </h2>
+                <p className="text-[11px] text-slate-500">
+                  کاملاً سازگار با نسخه دسکتاپ C++ Qt تیمار جهت خروجی گرفتن و بازیابی بدون نیاز به اینترنت
+                </p>
+              </div>
             </div>
+
+            {!isAuthenticated && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg">
+                <Lock className="w-3 h-3" />
+                <span>نیازمند ورود</span>
+              </span>
+            )}
           </div>
 
-          <div className="flex flex-col sm:flex-row items-center gap-3">
-            <button
-              onClick={onExportBackup}
-              className="w-full sm:w-auto px-4 py-2 text-xs font-bold text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg shadow-xs transition-colors flex items-center justify-center gap-2 cursor-pointer"
-            >
-              <Download className="w-3.5 h-3.5 text-sky-700" />
-              <span>خروجی فایل `timar_data.json`</span>
-            </button>
-
-            <label className="w-full sm:w-auto px-4 py-2 text-xs font-bold text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg shadow-xs transition-colors flex items-center justify-center gap-2 cursor-pointer">
-              <Upload className="w-3.5 h-3.5 text-sky-700" />
-              <span>بازیابی از فایل JSON</span>
-              <input type="file" accept=".json" onChange={handleFileChange} className="hidden" />
-            </label>
-          </div>
-
-          {importStatus && (
-            <div className="p-3 bg-sky-50 text-sky-900 border border-sky-200 rounded-lg text-xs">
-              {importStatus}
+          {!isAuthenticated ? (
+            <div className="p-4 rounded-lg bg-slate-100/80 border border-slate-200 text-xs text-slate-600 flex items-center justify-between gap-4">
+              <div className="flex items-center gap-2">
+                <Lock className="w-4 h-4 text-slate-400 shrink-0" />
+                <span>جهت خروجی گرفتن یا بازیابی اطلاعات پایگاه‌داده، ابتدا باید وارد حساب کاربری خود شوید.</span>
+              </div>
+              {onOpenLogin && (
+                <button
+                  type="button"
+                  onClick={onOpenLogin}
+                  className="px-3 py-1.5 text-xs font-bold text-sky-700 bg-white hover:bg-sky-50 border border-slate-200 rounded-lg shadow-2xs whitespace-nowrap cursor-pointer"
+                >
+                  ورود به حساب
+                </button>
+              )}
             </div>
+          ) : (
+            <>
+              <div className="flex flex-col sm:flex-row items-center gap-3">
+                <button
+                  onClick={onExportBackup}
+                  className="w-full sm:w-auto px-4 py-2 text-xs font-bold text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg shadow-xs transition-colors flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5 text-sky-700" />
+                  <span>خروجی فایل `timar_data.json`</span>
+                </button>
+
+                <label className="w-full sm:w-auto px-4 py-2 text-xs font-bold text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg shadow-xs transition-colors flex items-center justify-center gap-2 cursor-pointer">
+                  <Upload className="w-3.5 h-3.5 text-sky-700" />
+                  <span>بازیابی از فایل JSON</span>
+                  <input type="file" accept=".json" onChange={handleFileChange} className="hidden" />
+                </label>
+              </div>
+
+              {importStatus && (
+                <div className="p-3 bg-sky-50 text-sky-900 border border-sky-200 rounded-lg text-xs">
+                  {importStatus}
+                </div>
+              )}
+            </>
           )}
         </div>
 
         {/* User Account / Role summary */}
-        <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-3">
-          <div className="flex items-center gap-2 pb-3 border-b border-slate-100">
-            <ShieldCheck className="w-5 h-5 text-emerald-600" />
-            <h2 className="text-sm font-bold text-slate-900">کاربر فعال و سطح اختیارات</h2>
+        <div
+          className={`bg-white rounded-xl border p-5 shadow-xs space-y-3 ${
+            isAuthenticated ? 'border-slate-200' : 'border-dashed border-slate-300'
+          }`}
+        >
+          <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+            <div className="flex items-center gap-2">
+              <ShieldCheck className={`w-5 h-5 ${isAuthenticated ? 'text-emerald-600' : 'text-slate-400'}`} />
+              <h2 className="text-sm font-bold text-slate-900">کاربر فعال و سطح اختیارات</h2>
+            </div>
+            {!isAuthenticated && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-slate-600 bg-slate-100 rounded-lg">
+                عدم احراز هویت
+              </span>
+            )}
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs bg-slate-50 p-3.5 rounded-lg">
-            <div>
-              <span className="text-slate-400 block text-[11px]">نام کاربر</span>
-              <span className="font-bold text-slate-800">{currentUser?.fullName}</span>
+          {isAuthenticated ? (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs bg-slate-50 p-3.5 rounded-lg">
+              <div>
+                <span className="text-slate-400 block text-[11px]">نام کاربر</span>
+                <span className="font-bold text-slate-800">{currentUser?.fullName}</span>
+              </div>
+              <div>
+                <span className="text-slate-400 block text-[11px]">سطح دسترسی</span>
+                <span className="font-bold text-sky-700">
+                  {currentUser?.role === 'manager' ? 'مدیر فنی (دسترسی کامل)' : 'تکنسین عملیات (ثبت و گزارش)'}
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-400 block text-[11px]">واحد سازمانی</span>
+                <span className="text-slate-700">{currentUser?.department || 'تصفیه‌خانه'}</span>
+              </div>
             </div>
-            <div>
-              <span className="text-slate-400 block text-[11px]">سطح دسترسی</span>
-              <span className="font-bold text-sky-700">
-                {currentUser?.role === 'manager' ? 'مدیر فنی (دسترسی کامل)' : 'تکنسین عملیات (ثبت و گزارش)'}
-              </span>
+          ) : (
+            <div className="p-3 bg-slate-50 rounded-lg text-xs text-slate-500 leading-relaxed flex items-center justify-between gap-4">
+              <span>کاربر فعالی در سامانه احراز هویت نشده است. لطفاً برای دسترسی به عملیات وارد سامانه شوید.</span>
+              {onOpenLogin && (
+                <button
+                  type="button"
+                  onClick={onOpenLogin}
+                  className="px-3 py-1.5 text-xs font-bold text-white bg-sky-700 hover:bg-sky-600 rounded-lg shadow-2xs whitespace-nowrap cursor-pointer shrink-0"
+                >
+                  ورود به سامانه
+                </button>
+              )}
             </div>
-            <div>
-              <span className="text-slate-400 block text-[11px]">واحد سازمانی</span>
-              <span className="text-slate-700">{currentUser?.department}</span>
-            </div>
-          </div>
+          )}
         </div>
+
+        {/* Manager-only User Management Panel (ONLY when authenticated as manager) */}
+        {isAuthenticated && currentUser?.role === 'manager' && (
+          <UserManagementPanel
+            currentUser={currentUser}
+            users={users}
+            onUsersUpdated={onUsersUpdated || (async () => {})}
+            scriptUrl={appsScriptUrl}
+          />
+        )}
       </div>
 
-      {/* Code.gs Modal */}
+      {/* Code.gs Modal (ACCESSIBLE TO USER REGARDLESS OF LOGIN STATE) */}
       {showCodeModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
           <div className="w-full max-w-3xl bg-white rounded-xl shadow-2xl border border-slate-200 flex flex-col max-h-[85vh] overflow-hidden">
@@ -253,7 +381,7 @@ export const SettingsSectionView: React.FC<SettingsSectionViewProps> = ({
               <div>
                 <h3 className="text-sm font-bold text-slate-900">کدهای سرور Google Apps Script (`Code.gs`)</h3>
                 <p className="text-xs text-slate-500">
-                  این کدها را در ویرایشگر Apps Script شیت گوگل خود جای‌گذاری نمایید
+                  این کدها را در ویرایشگر Apps Script شیت گوگل خود جای‌گذاری و به عنوان وب‌اپلیکیشن منتشر نمایید
                 </p>
               </div>
 
