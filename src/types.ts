@@ -17,25 +17,6 @@ export interface UserCredential {
   updatedAt: number;
 }
 
-export interface AuthSession {
-  token: string;
-  user: User;
-  expiresAt: number;
-  createdAt: number;
-}
-
-export interface SessionRecord {
-  id: string;
-  tokenHash: string;
-  userId: string;
-  username: string;
-  role: Role;
-  createdAt: number;
-  expiresAt: number;
-  isRevoked: boolean;
-  lastActivityAt?: number;
-}
-
 export type AssetCategory =
   | 'Intake & Screening'
   | 'Coagulation & Flocculation'
