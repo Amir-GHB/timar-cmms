@@ -21,6 +21,7 @@ import type { User } from '../../types';
 import { APPS_SCRIPT_CODE } from '../../services/appsScriptTemplate';
 import { UserManagementPanel } from '../settings/UserManagementPanel';
 import { getUrlValidationError, isValidAppsScriptUrl } from '../../config/constants';
+import { APP_BUILD_CHANNEL, APP_VERSION } from '../../version';
 
 interface SettingsSectionViewProps {
   appsScriptUrl: string;
@@ -371,6 +372,23 @@ export const SettingsSectionView: React.FC<SettingsSectionViewProps> = ({
             scriptUrl={appsScriptUrl}
           />
         )}
+      </div>
+
+      {/* Manual build marker for diagnosing stale browser/PWA builds */}
+      <div className="max-w-4xl">
+        <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-xs flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <Info className="w-5 h-5 text-sky-600 shrink-0" />
+            <div>
+              <h2 className="text-sm font-bold text-slate-900">نسخه برنامه (Build Version)</h2>
+              <p className="text-[11px] text-slate-500">برای بررسی اینکه مرورگر نسخه جدید را بارگذاری کرده است، این شناسه را با نسخه مورد انتظار مقایسه کنید.</p>
+            </div>
+          </div>
+          <div className="sm:text-left space-y-1" dir="ltr">
+            <div className="font-mono text-sm font-bold text-sky-800 select-all">{APP_VERSION}</div>
+            <div className="text-[10px] text-slate-500 break-all">Channel: {APP_BUILD_CHANNEL}</div>
+          </div>
+        </div>
       </div>
 
       {/* Code.gs Modal (ACCESSIBLE TO USER REGARDLESS OF LOGIN STATE) */}
