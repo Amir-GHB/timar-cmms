@@ -2,7 +2,6 @@ import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import type {
   User,
   UserCredential,
-  SessionRecord,
   Asset,
   SubAsset,
   MaintenanceEvent,
@@ -22,11 +21,6 @@ export interface TimarDB extends DBSchema {
     key: string;
     value: UserCredential;
     indexes: { 'by-username': string };
-  };
-  sessions: {
-    key: string;
-    value: SessionRecord;
-    indexes: { 'by-tokenHash': string; 'by-user': string };
   };
   assets: {
     key: string;
@@ -65,7 +59,7 @@ export interface TimarDB extends DBSchema {
 }
 
 const DB_NAME = 'timar_cmms_db';
-const DB_VERSION = 3; // Upgraded for secure credentials and sessions
+const DB_VERSION = 4; // Removed the obsolete token session store
 
 let dbPromise: Promise<IDBPDatabase<TimarDB>> | null = null;
 
@@ -81,10 +75,8 @@ export function getDB(): Promise<IDBPDatabase<TimarDB>> {
           const credStore = db.createObjectStore('userCredentials', { keyPath: 'userId' });
           credStore.createIndex('by-username', 'usernameNormalized', { unique: true });
         }
-        if (!db.objectStoreNames.contains('sessions')) {
-          const sessionStore = db.createObjectStore('sessions', { keyPath: 'id' });
-          sessionStore.createIndex('by-tokenHash', 'tokenHash', { unique: true });
-          sessionStore.createIndex('by-user', 'userId');
+        if (db.objectStoreNames.contains('sessions')) {
+          db.deleteObjectStore('sessions');
         }
         if (!db.objectStoreNames.contains('assets')) {
           const assetStore = db.createObjectStore('assets', { keyPath: 'id' });
@@ -211,7 +203,6 @@ export async function initializeDatabase(): Promise<void> {
   // Clear any old English demo rows
   await db.clear('users');
   await db.clear('userCredentials');
-  await db.clear('sessions');
   await db.clear('assets');
   await db.clear('subassets');
   await db.clear('events');
