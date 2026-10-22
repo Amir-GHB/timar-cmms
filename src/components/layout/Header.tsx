@@ -89,28 +89,38 @@ export const Header: React.FC<HeaderProps> = ({
         {/* PWA Install */}
         <PWAInstallButton />
 
-        {/* User Account / Role Switcher */}
+        {/* User Account / Sign In */}
         <button
           onClick={onOpenLogin}
           className="flex items-center gap-2 px-2.5 py-1 bg-slate-100 hover:bg-slate-200/80 border border-slate-200 rounded-lg transition-colors cursor-pointer"
-          title="تغییر کاربر یا مشاهده نقش"
+          title={currentUser ? 'مشاهده مشخصات یا خروج از حساب' : 'ورود به سامانه'}
         >
-          {currentUser?.role === 'manager' ? (
-            <div className="w-6 h-6 rounded-full bg-emerald-600 text-white flex items-center justify-center">
-              <ShieldCheck className="w-3.5 h-3.5" />
-            </div>
+          {currentUser ? (
+            currentUser.role === 'manager' ? (
+              <div className="w-6 h-6 rounded-full bg-emerald-600 text-white flex items-center justify-center">
+                <ShieldCheck className="w-3.5 h-3.5" />
+              </div>
+            ) : (
+              <div className="w-6 h-6 rounded-full bg-sky-600 text-white flex items-center justify-center">
+                <Wrench className="w-3.5 h-3.5" />
+              </div>
+            )
           ) : (
-            <div className="w-6 h-6 rounded-full bg-sky-600 text-white flex items-center justify-center">
-              <Wrench className="w-3.5 h-3.5" />
+            <div className="w-6 h-6 rounded-full bg-slate-700 text-white flex items-center justify-center">
+              <ShieldCheck className="w-3.5 h-3.5" />
             </div>
           )}
 
           <div className="flex flex-col text-right">
             <span className="text-xs font-bold text-slate-900 leading-tight">
-              {currentUser?.fullName || 'کاربر'}
+              {currentUser?.fullName || 'ورود به سامانه'}
             </span>
             <span className="text-[10px] font-bold text-slate-500">
-              {currentUser?.role === 'manager' ? 'مدیر فنی' : 'تکنسین'}
+              {currentUser
+                ? currentUser.role === 'manager'
+                  ? 'مدیر فنی'
+                  : 'تکنسین عملیات'
+                : 'احراز هویت'}
             </span>
           </div>
         </button>

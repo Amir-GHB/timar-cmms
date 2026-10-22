@@ -15,6 +15,7 @@ import {
   CheckSquare,
   Square,
   RotateCcw,
+  Loader2,
 } from 'lucide-react';
 import type { MaintenanceEvent, Asset, MaintenanceSchedule } from '../../types';
 import {
@@ -27,6 +28,7 @@ import {
 import { TimeService } from '../../utils/timeService';
 import { EventDetailsModal } from '../maintenance/EventDetailsModal';
 import { PersianDatePicker } from '../common/PersianDatePicker';
+import { generateReportPdf } from '../../utils/pdfGenerator';
 
 interface ReportsSectionViewProps {
   events: MaintenanceEvent[];
@@ -44,9 +46,12 @@ export const ReportsSectionView: React.FC<ReportsSectionViewProps> = ({
     assets.map((a) => a.id)
   );
   const [activeTab, setActiveTab] = useState<'all' | 'happened' | 'overdue'>('all');
-  const [activeDatePreset, setActiveDatePreset] = useState<'all' | 'week' | 'month' | 'last_month' | 'custom'>('all');
+  const [activeDatePreset, setActiveDatePreset] = useState<
+    'week' | 'month' | 'last_6_months' | 'current_year' | 'custom' | null
+  >(null);
   const [startDate, setStartDate] = useState<string>('');
   const [endDate, setEndDate] = useState<string>('');
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState<boolean>(false);
   const [inspectEvent, setInspectEvent] = useState<MaintenanceEvent | null>(null);
 
   const isAllAssetsSelected = selectedAssetIds.length === assets.length;
@@ -69,53 +74,64 @@ export const ReportsSectionView: React.FC<ReportsSectionViewProps> = ({
 
   const todayIso = TimeService.getTehranDateString();
 
-  // Handle Preset Selection: Current Week, Current Month, Last Month, All Time
-  const handleSelectPreset = (preset: 'all' | 'week' | 'month' | 'last_month') => {
+  // Exactly 4 presets: Current Week, Current Month, Last 6 Months, Current Year (all ending through today)
+  const handleSelectPreset = (preset: 'week' | 'month' | 'last_6_months' | 'current_year') => {
     setActiveDatePreset(preset);
     const jToday = isoToJalali(todayIso);
 
-    if (preset === 'all') {
-      setStartDate('');
-      setEndDate('');
-      return;
-    }
-
     if (preset === 'week') {
-      // In Iranian calendar, week starts on Saturday (شنبه) and ends on Friday (جمعه)
+      // In Iranian calendar, week starts on Saturday (شنبه) through today
       const now = new Date(todayIso + 'T00:00:00Z');
       const dayOfWeek = (now.getUTCDay() + 1) % 7; // 0 for Saturday, 6 for Friday
       const sat = new Date(now.getTime() - dayOfWeek * 86400000);
-      const fri = new Date(sat.getTime() + 6 * 86400000);
       setStartDate(sat.toISOString().split('T')[0]);
-      setEndDate(fri.toISOString().split('T')[0]);
+      setEndDate(todayIso);
       return;
     }
 
     if (preset === 'month') {
+      // From 1st of current Jalali month through today
       if (!jToday) return;
       const [jy, jm] = jToday;
       const start = jalaliToIso(jy, jm, 1);
-      const end = jalaliToIso(jy, jm, getJalaliMonthDays(jy, jm));
       setStartDate(start);
-      setEndDate(end);
+      setEndDate(todayIso);
       return;
     }
 
-    if (preset === 'last_month') {
+    if (preset === 'last_6_months') {
+      // From six Persian (Jalali) calendar months ago through today
       if (!jToday) return;
-      let [jy, jm] = jToday;
-      if (jm === 1) {
-        jy -= 1;
-        jm = 12;
-      } else {
-        jm -= 1;
+      const [jy, jm, jd] = jToday;
+      let targetY = jy;
+      let targetM = jm - 6;
+      if (targetM <= 0) {
+        targetY -= 1;
+        targetM += 12;
       }
-      const start = jalaliToIso(jy, jm, 1);
-      const end = jalaliToIso(jy, jm, getJalaliMonthDays(jy, jm));
+      const maxDays = getJalaliMonthDays(targetY, targetM);
+      const targetD = Math.min(jd, maxDays);
+      const start = jalaliToIso(targetY, targetM, targetD);
       setStartDate(start);
-      setEndDate(end);
+      setEndDate(todayIso);
       return;
     }
+
+    if (preset === 'current_year') {
+      // From 1 Farvardin of current Persian year through today
+      if (!jToday) return;
+      const [jy] = jToday;
+      const start = jalaliToIso(jy, 1, 1);
+      setStartDate(start);
+      setEndDate(todayIso);
+      return;
+    }
+  };
+
+  const handleClearDateFilter = () => {
+    setActiveDatePreset(null);
+    setStartDate('');
+    setEndDate('');
   };
 
   // Reports show what happened (completed) or overdue / uncompleted within selected assets and date range
@@ -185,9 +201,42 @@ export const ReportsSectionView: React.FC<ReportsSectionViewProps> = ({
     document.body.removeChild(link);
   };
 
-  // Export PDF / Print
-  const handleExportPdf = () => {
-    window.print();
+  // Export PDF with real jspdf generation
+  const handleExportPdf = async () => {
+    try {
+      setIsGeneratingPdf(true);
+      const totalDurationHours = relevantEvents.reduce((acc, e) => acc + (e.durationHours || 0), 0);
+      const totalDowntimeHours = relevantEvents.reduce((acc, e) => acc + (e.downtimeHours || 0), 0);
+      const scopeLabel =
+        activeTab === 'happened'
+          ? 'تنها اقدامات انجام‌شده (سوابق قطعی)'
+          : activeTab === 'overdue'
+          ? 'اقدامات معوق و دارای تاخیر'
+          : 'کلیه سوابق و اقدامات معوق';
+
+      await generateReportPdf({
+        title: 'گزارش عملکرد نگهداری و تعمیرات تصفیه‌خانه آب تیمار',
+        reportScope: scopeLabel,
+        startDate: startDate ? formatPersianDate(startDate) : undefined,
+        endDate: endDate ? formatPersianDate(endDate) : undefined,
+        generatedAt: formatPersianDate(new Date(), { showMonthName: true }),
+        generatedBy: 'سامانه مدیریت نگهداری و تعمیرات تیمار',
+        selectedAssetsCount: selectedAssetIds.length,
+        totalAssetsCount: assets.length,
+        events: relevantEvents,
+        stats: {
+          totalEvents: relevantEvents.length,
+          completedCount: happenedCount,
+          overdueCount: overdueCount,
+          totalDurationHours,
+          totalDowntimeHours,
+        },
+      });
+    } catch (err) {
+      console.error('PDF generation error:', err);
+    } finally {
+      setIsGeneratingPdf(false);
+    }
   };
 
   return (
@@ -303,7 +352,7 @@ export const ReportsSectionView: React.FC<ReportsSectionViewProps> = ({
             {(startDate || endDate) && (
               <button
                 type="button"
-                onClick={() => handleSelectPreset('all')}
+                onClick={handleClearDateFilter}
                 className="text-[10px] text-sky-700 hover:text-sky-900 font-semibold flex items-center gap-1 cursor-pointer"
                 title="پاک‌کردن فیلتر تاریخ"
               >
@@ -313,13 +362,13 @@ export const ReportsSectionView: React.FC<ReportsSectionViewProps> = ({
             )}
           </div>
 
-          {/* 4 Preset Buttons */}
+          {/* Exactly 4 Preset Buttons: Current Week, Current Month, Last 6 Months, Current Year */}
           <div className="grid grid-cols-2 gap-1.5">
             {[
               { id: 'week', label: 'هفته جاری' },
               { id: 'month', label: 'ماه جاری' },
-              { id: 'last_month', label: 'ماه گذشته' },
-              { id: 'all', label: 'همه زمان‌ها' },
+              { id: 'last_6_months', label: '۶ ماه گذشته' },
+              { id: 'current_year', label: 'سال جاری' },
             ].map((p) => {
               const isSelected = activeDatePreset === p.id;
               return (
@@ -374,7 +423,7 @@ export const ReportsSectionView: React.FC<ReportsSectionViewProps> = ({
           {(startDate || endDate) && (
             <div className="text-[10px] text-slate-500 bg-slate-50 p-1.5 rounded border border-slate-200/80 font-mono text-center">
               بازه: {startDate ? formatPersianDate(startDate) : 'ابتدا'} تا{' '}
-              {endDate ? formatPersianDate(endDate) : 'اکنون'}
+              {endDate ? formatPersianDate(endDate) : 'امروز'}
             </div>
           )}
         </div>
@@ -386,10 +435,20 @@ export const ReportsSectionView: React.FC<ReportsSectionViewProps> = ({
         <div className="pt-3 border-t border-slate-200 space-y-2">
           <button
             onClick={handleExportPdf}
-            className="w-full py-2.5 px-3 text-xs font-bold text-white bg-sky-700 hover:bg-sky-600 rounded-lg shadow-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+            disabled={isGeneratingPdf}
+            className="w-full py-2.5 px-3 text-xs font-bold text-white bg-sky-700 hover:bg-sky-600 disabled:bg-sky-400 rounded-lg shadow-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
           >
-            <Printer className="w-3.5 h-3.5" />
-            <span>خروجی PDF / چاپ رسمی گزارش</span>
+            {isGeneratingPdf ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <span>در حال ایجاد فایل PDF...</span>
+              </>
+            ) : (
+              <>
+                <Printer className="w-3.5 h-3.5" />
+                <span>خروجی PDF / دانلود فایل گزارش</span>
+              </>
+            )}
           </button>
 
           <button
