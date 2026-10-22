@@ -153,10 +153,14 @@ export default function App() {
         setCurrentUser(loadedUsers[0]);
       }
 
-      const scriptUrl = typeof urlSetting?.value === 'string' ? urlSetting.value : '';
-      if (scriptUrl) {
-        setAppsScriptUrl(scriptUrl);
+      const scriptUrl =
+        typeof urlSetting?.value === 'string' && urlSetting.value.trim()
+          ? urlSetting.value.trim()
+          : DEFAULT_APPS_SCRIPT_URL;
+      if (!urlSetting?.value || typeof urlSetting.value !== 'string' || !urlSetting.value.trim()) {
+        await db.put('settings', { key: 'appsScriptUrl', value: scriptUrl });
       }
+      setAppsScriptUrl(scriptUrl);
 
       setPendingCount(queueCount);
 
