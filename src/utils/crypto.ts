@@ -1,7 +1,6 @@
 /**
  * Cryptographic and Authentication Utilities
- * Implements salted PBKDF2 password hashing via Web Crypto API,
- * secure unpredictable token generation, and canonical username normalization.
+ * Implements salted PBKDF2 password hashing and canonical username normalization.
  */
 
 const PBKDF2_ITERATIONS = 100000;
@@ -199,23 +198,4 @@ export async function verifyPassword(password: string, storedHash: string): Prom
 
   const actualHash = new Uint8Array(derivedBits);
   return constantTimeEqual(expectedHash, actualHash);
-}
-
-/**
- * Generates an unpredictable, cryptographically random session token (hex string).
- */
-export function generateSecureToken(byteLength = 32): string {
-  const bytes = getRandomBytes(byteLength);
-  return bufferToHex(bytes.buffer);
-}
-
-/**
- * Computes SHA-256 hash of a string (used to store session token hashes rather than raw tokens).
- */
-export async function hashToken(token: string): Promise<string> {
-  const subtle = getSubtleCrypto();
-  const encoder = new TextEncoder();
-  const data = encoder.encode(token);
-  const hashBuffer = await subtle.digest('SHA-256', data);
-  return bufferToHex(hashBuffer);
 }
