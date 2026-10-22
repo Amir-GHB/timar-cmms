@@ -166,7 +166,6 @@ export default function App() {
       const authUser = await AuthService.init(scriptUrl);
       if (authUser) {
         setCurrentUser(authUser);
-        AuthService.validateServerSession(scriptUrl).catch(() => {});
       } else {
         setCurrentUser(null);
       }
