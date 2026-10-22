@@ -1,6 +1,8 @@
 import { getDB } from './db';
-import type { SyncMutation, SyncStatus, User } from '../types';
+import type { SyncMutation, SyncStatus } from '../types';
 import { TimeService } from '../utils/timeService';
+import { AuthService } from './authService';
+import { DEFAULT_APPS_SCRIPT_URL, getUrlValidationError } from '../config/constants';
 
 export class SyncEngine {
   private static isSyncing = false;
@@ -65,11 +67,13 @@ export class SyncEngine {
   }
 
   public static async testConnection(url: string): Promise<{ success: boolean; message: string }> {
-    if (!url || !url.startsWith('http')) {
-      return { success: false, message: 'لطفاً یک آدرس معتبر Google Apps Script Web App وارد کنید.' };
+    const validationError = getUrlValidationError(url);
+    if (validationError) {
+      return { success: false, message: validationError };
     }
     try {
-      const pingUrl = url.includes('?') ? `${url}&action=ping` : `${url}?action=ping`;
+      const trimmed = url.trim();
+      const pingUrl = trimmed.includes('?') ? `${trimmed}&action=ping` : `${trimmed}?action=ping`;
       const res = await fetch(pingUrl, {
         method: 'GET',
         headers: { Accept: 'application/json' },
@@ -89,7 +93,7 @@ export class SyncEngine {
       const msg = err instanceof Error ? err.message : String(err);
       return {
         success: false,
-        message: `خطای ارتباط: ${msg}. مطمئن شوید دسترسی Web App روی Anyone تنظیم شده باشد.`,
+        message: `خطای ارتباط با سرور گوگل: ${msg}. مطمئن شوید اینترنت متصل است و دسترسی انتشار Web App روی Anyone تنظیم شده باشد.`,
       };
     }
   }
@@ -101,17 +105,14 @@ export class SyncEngine {
 
     const db = await getDB();
     const scriptUrlSetting = await db.get('settings', 'appsScriptUrl');
-    const scriptUrl = typeof scriptUrlSetting?.value === 'string' ? scriptUrlSetting.value.trim() : '';
-
-    const pendingCount = await db.count('syncQueue');
+    let scriptUrl = typeof scriptUrlSetting?.value === 'string' ? scriptUrlSetting.value.trim() : '';
 
     if (!scriptUrl) {
-      this.notify('offline', pendingCount);
-      return {
-        success: false,
-        message: 'آدرس گوگل اپس اسکریپت پیکربندی نشده است. سیستم در وضعیت محلی آفلاین کار می‌کند.',
-      };
+      scriptUrl = DEFAULT_APPS_SCRIPT_URL;
+      await db.put('settings', { key: 'appsScriptUrl', value: DEFAULT_APPS_SCRIPT_URL });
     }
+
+    const pendingCount = await db.count('syncQueue');
 
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       this.notify('offline', pendingCount);
@@ -128,14 +129,21 @@ export class SyncEngine {
       const mutations = await db.getAll('syncQueue');
       const lastSyncSetting = await db.get('settings', 'lastSyncTimestamp');
       const lastSyncTimestamp = typeof lastSyncSetting?.value === 'number' ? lastSyncSetting.value : 0;
-      const currentUserSetting = await db.get('settings', 'currentUser');
-      const clientUser = (currentUserSetting?.value as User)?.fullName || 'تکنسین سیستم تیمار';
+      const sessionToken = AuthService.getServerSessionToken();
+      if (!sessionToken) {
+        this.isSyncing = false;
+        this.notify('error', pendingCount);
+        return {
+          success: false,
+          message: 'برای همگام‌سازی ابری باید با اتصال اینترنت وارد حساب شوید تا سرور نشست معتبر صادر کند. تغییرات محلی در صف باقی می‌مانند.',
+        };
+      }
 
       const payload = {
         action: 'syncFull',
+        sessionToken,
         mutations,
         sinceTimestamp: lastSyncTimestamp,
-        clientUser,
       };
 
       const response = await fetch(scriptUrl, {
