@@ -1,26 +1,35 @@
 /**
  * Production-ready Google Apps Script backend code (`Code.gs`)
  * Users paste this into Google Sheets -> Extensions -> Apps Script.
- * 
- * Implements:
- * - Authoritative server-side session authentication & token validation
- * - Salted password hashing and legacy plaintext password auto-migration
- * - Manager-only authorization for user creation, role changes, and schedule mutation
- * - Race-safe username uniqueness enforcement using LockService
- * - Credential exclusion from synchronization responses and audit logs
- * - Automated daily PM schedule evaluation at midnight Tehran time
  */
 
 export const APPS_SCRIPT_CODE = `/**
  * ============================================================================
  * TIMAR CMMS - WATER TREATMENT PLANT
- * Google Apps Script Authoritative Cloud API & Security Engine
+ * Google Apps Script Authoritative Cloud API & Scheduler
  * Timezone: Asia/Tehran
+ * ============================================================================
+ * 
+ * SETUP INSTRUCTIONS:
+ * 1. Open Google Sheets (https://sheets.new).
+ * 2. Go to: Extensions > Apps Script.
+ * 3. Replace all code in Code.gs with this entire file.
+ * 4. In the Apps Script toolbar, select the "setupSheets" function and click "Run".
+ *    (Accept the Google permission prompt; this initializes or upgrades your relational sheets).
+ * 5. (Optional) Run "setupDailyTrigger" in Apps Script toolbar to automatically check and
+ *    generate due PM maintenance events daily at midnight Tehran time even when no user is online!
+ * 6. Click "Deploy" (top right) > "New deployment".
+ * 7. Select type: "Web app".
+ * 8. Set:
+ *    - Description: "Timar CMMS Web API"
+ *    - Execute as: "Me"
+ *    - Who has access: "Anyone" (allows your PWA client to communicate with CORS)
+ * 9. Click "Deploy", copy the Web App URL (starts with https://script.google.com/macros/s/...)
+ * 10. Paste that URL into Timar PWA Settings > Google Apps Script Cloud Sync.
  * ============================================================================
  */
 
 var TEHRAN_TZ = "Asia/Tehran";
-var SESSION_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 function getTehranDateString(dateObj) {
   var d = dateObj || new Date();
@@ -56,81 +65,12 @@ function calculateNextDueDate(baseDateStr, intervalType, intervalValue) {
   return y + "-" + m + "-" + d;
 }
 
-// ============================================================================
-// CRYPTO & PASSWORD HASHING (Salted SHA-256 Multi-Round)
-// ============================================================================
-
-function generateRandomSalt() {
-  return Utilities.getUuid().replace(/-/g, "").substring(0, 16);
-}
-
-function hashPasswordServer(password, customSalt) {
-  var salt = customSalt || generateRandomSalt();
-  var rounds = 5000;
-  var raw = salt + ":" + password;
-  var hashBytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, raw, Utilities.Charset.UTF_8);
-  for (var i = 0; i < rounds; i++) {
-    hashBytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, hashBytes);
-  }
-  var hex = "";
-  for (var j = 0; j < hashBytes.length; j++) {
-    var b = hashBytes[j] < 0 ? hashBytes[j] + 256 : hashBytes[j];
-    var h = b.toString(16);
-    hex += (h.length === 1 ? "0" + h : h);
-  }
-  return "sha256:" + rounds + ":" + salt + ":" + hex;
-}
-
-function verifyPasswordServer(password, storedHash) {
-  if (!password || !storedHash) return false;
-  var str = String(storedHash).trim();
-
-  // If stored in format "sha256:rounds:salt:hex"
-  if (str.indexOf("sha256:") === 0) {
-    var parts = str.split(":");
-    if (parts.length === 4) {
-      var salt = parts[2];
-      var candidate = hashPasswordServer(password, salt);
-      return candidate === str;
-    }
-  }
-
-  // Legacy plaintext check (for migration only)
-  if (str === password) {
-    return true;
-  }
-
-  return false;
-}
-
-function hashTokenServer(token) {
-  var hashBytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(token), Utilities.Charset.UTF_8);
-  var hex = "";
-  for (var i = 0; i < hashBytes.length; i++) {
-    var b = hashBytes[i] < 0 ? hashBytes[i] + 256 : hashBytes[i];
-    var h = b.toString(16);
-    hex += (h.length === 1 ? "0" + h : h);
-  }
-  return hex;
-}
-
-function generateSecureTokenServer() {
-  return Utilities.getUuid().replace(/-/g, "") + Utilities.getUuid().replace(/-/g, "");
-}
-
-// ============================================================================
-// DATABASE & RELATIONAL SHEETS SETUP
-// ============================================================================
-
 function setupSheets() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   
   var schemas = {
     "Users": [
-      "id", "username", "passwordHash", "fullName", "role", "department", "isActive", "updatedAt"
-    ],
-    "Sessions": [
-      "id", "tokenHash", "userId", "username", "role", "createdAt", "expiresAt", "isRevoked"
+      "id", "username", "password", "fullName", "role", "department", "isActive", "updatedAt"
     ],
     "Assets": [
       "id", "name", "code", "parentId", "category", "status", "serialNumber",
@@ -160,9 +100,6 @@ function setupSheets() {
     ],
     "SyncLog": [
       "timestamp", "clientUser", "action", "recordsProcessed", "status"
-    ],
-    "SecurityLog": [
-      "timestamp", "eventType", "username", "status", "details"
     ]
   };
 
@@ -175,6 +112,7 @@ function setupSheets() {
       sheet.getRange(1, 1, 1, targetHeaders.length).setFontWeight("bold").setBackground("#0284c7").setFontColor("#ffffff");
       sheet.setFrozenRows(1);
     } else {
+      // Non-destructive column upgrade: add missing headers to row 1
       var existingData = sheet.getRange(1, 1, 1, Math.max(1, sheet.getLastColumn())).getValues()[0];
       var existingHeaders = [];
       for (var i = 0; i < existingData.length; i++) {
@@ -191,36 +129,22 @@ function setupSheets() {
     }
   }
 
-  // Pre-seed initial accounts with salted password hashes (NO plaintext!)
+  // Pre-seed default manager & technician if Users sheet is empty
   var usersSheet = ss.getSheetByName("Users");
   if (usersSheet.getLastRow() <= 1) {
     var now = new Date().getTime();
-    var mgrHash = hashPasswordServer("Admin#2026@Timar");
-    var tech1Hash = hashPasswordServer("Tech#2026@Timar");
-    var tech2Hash = hashPasswordServer("Tech#2026@Timar");
-
     usersSheet.appendRow([
-      "usr-1", "manager", mgrHash, "مهندس رضا محمدی", "manager", "مدیریت فنی و مهندسی تصفیه‌خانه", true, now
+      "usr-1", "manager", "admin123", "مهندس رضا محمدی", "manager", "مدیریت فنی و مهندسی تصفیه‌خانه", true, now
     ]);
     usersSheet.appendRow([
-      "usr-2", "tech1", tech1Hash, "علی کریمی", "technician", "واحد تعمیرات مکانیک", true, now
+      "usr-2", "tech1", "tech123", "علی کریمی", "technician", "واحد تعمیرات مکانیک", true, now
     ]);
     usersSheet.appendRow([
-      "usr-3", "tech2", tech2Hash, "سارا تهرانی", "technician", "واحد برق و ابزار دقیق", true, now
+      "usr-3", "tech2", "tech123", "سارا تهرانی", "technician", "واحد برق و ابزار دقیق", true, now
     ]);
-  } else {
-    // Migration: upgrade any legacy plaintext passwords to salted hashes
-    var userRows = usersSheet.getDataRange().getValues();
-    for (var r = 1; r < userRows.length; r++) {
-      var storedPass = String(userRows[r][2] || "").trim();
-      if (storedPass && storedPass.indexOf("sha256:") !== 0 && storedPass.indexOf("pbkdf2:") !== 0) {
-        var upgradedHash = hashPasswordServer(storedPass);
-        usersSheet.getRange(r + 1, 3).setValue(upgradedHash);
-      }
-    }
   }
 
-  Logger.log("Timar CMMS sheets initialized / upgraded successfully with security policies.");
+  Logger.log("Timar CMMS sheets initialized / upgraded successfully.");
 }
 
 function setupDailyTrigger() {
@@ -236,126 +160,190 @@ function setupDailyTrigger() {
     .atHour(0)
     .inTimezone(TEHRAN_TZ)
     .create();
-  Logger.log("Daily midnight automated schedule trigger installed.");
+  Logger.log("Daily midnight Tehran automated schedule trigger installed.");
 }
 
-function logSecurityEvent(ss, eventType, username, status, details) {
-  try {
-    var logSheet = ss.getSheetByName("SecurityLog");
-    if (logSheet) {
-      logSheet.appendRow([
-        new Date(), eventType, username || "anonymous", status, details || ""
-      ]);
+/**
+ * Authoritative Backend Schedule Processor
+ * Evaluates active schedules against Tehran calendar date and generates due PM events.
+ * Safe against duplicates and does not advance the schedule until maintenance completion.
+ */
+function processDueSchedules() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var schedSheet = ss.getSheetByName("Schedules");
+  var evtSheet = ss.getSheetByName("Events");
+  if (!schedSheet || !evtSheet) return { generatedCount: 0 };
+
+  var schedValues = schedSheet.getDataRange().getValues();
+  if (schedValues.length <= 1) return { generatedCount: 0 };
+  var schedHeaders = schedValues[0];
+  var schedColMap = {};
+  for (var c = 0; c < schedHeaders.length; c++) schedColMap[schedHeaders[c]] = c;
+
+  var evtValues = evtSheet.getDataRange().getValues();
+  var evtHeaders = evtValues[0];
+  var evtColMap = {};
+  for (var e = 0; e < evtHeaders.length; e++) evtColMap[evtHeaders[e]] = e;
+
+  var existingEventIds = {};
+  for (var r = 1; r < evtValues.length; r++) {
+    var idVal = String(evtValues[r][evtColMap["id"] || 0]);
+    if (idVal) existingEventIds[idVal] = true;
+  }
+
+  var todayTehran = getTehranDateString(new Date());
+  var nowMs = new Date().getTime();
+  var generatedCount = 0;
+
+  // 1. Reconcile Expired Manual Events -> 'missed'
+  for (var r = 1; r < evtValues.length; r++) {
+    var evtRow = evtValues[r];
+    var isEvtDeleted = !!evtRow[evtColMap["isDeleted"]];
+    if (isEvtDeleted) continue;
+
+    var curStatus = String(evtRow[evtColMap["status"]]);
+    if (curStatus !== "scheduled" && curStatus !== "in_progress") continue;
+
+    var isAutomated = !!evtRow[evtColMap["isAutomatedPM"]];
+    var hasDeadline = !!evtRow[evtColMap["hasDeadline"]];
+    var deadlineDate = String(evtRow[evtColMap["deadlineDate"]] || evtRow[evtColMap["date"]] || "");
+
+    if (!isAutomated && hasDeadline && deadlineDate && deadlineDate < todayTehran) {
+      if (evtColMap["status"] !== undefined) {
+        evtSheet.getRange(r + 1, evtColMap["status"] + 1).setValue("missed");
+      }
+      if (evtColMap["updatedAt"] !== undefined) {
+        evtSheet.getRange(r + 1, evtColMap["updatedAt"] + 1).setValue(nowMs);
+      }
+      evtRow[evtColMap["status"]] = "missed";
     }
-  } catch(e) {}
-}
+  }
 
-// ============================================================================
-// SERVER SESSION MANAGEMENT & AUTHORIZATION
-// ============================================================================
+  // 2. Reconcile Recurring Schedules and Occurrences
+  for (var s = 1; s < schedValues.length; s++) {
+    var row = schedValues[s];
+    var isDeleted = !!row[schedColMap["isDeleted"]];
+    var status = String(row[schedColMap["status"]]);
+    if (isDeleted || status === "paused") continue;
 
-function createSessionRecord(ss, user) {
-  var sessionSheet = ss.getSheetByName("Sessions");
-  if (!sessionSheet) return null;
+    var schId = String(row[schedColMap["id"]]);
+    var nextDueDate = String(row[schedColMap["nextDueDate"]]);
+    if (!nextDueDate) continue;
 
-  var token = generateSecureTokenServer();
-  var tokenHash = hashTokenServer(token);
-  var now = new Date().getTime();
-  var expiresAt = now + SESSION_DURATION_MS;
-  var sessionId = "sess-" + now + "-" + Utilities.getUuid().substring(0, 4);
+    var intervalType = String(row[schedColMap["intervalType"]] || "months");
+    var intervalValue = parseInt(row[schedColMap["intervalValue"]], 10) || 1;
 
-  sessionSheet.appendRow([
-    sessionId, tokenHash, user.id, user.username, user.role, now, expiresAt, false
-  ]);
+    var scheduleRowIndex = s + 1; // 1-based
+    var scheduleUpdated = false;
 
-  return {
-    sessionToken: token,
-    expiresAt: expiresAt
-  };
-}
+    // Check if the previous occurrence's window has expired because next interval arrived
+    var subsequentIntervalDate = calculateNextDueDate(nextDueDate, intervalType, intervalValue);
+    if (todayTehran >= subsequentIntervalDate) {
+      var prevDeterministicId = "evt-pm-" + schId + "-" + nextDueDate;
+      for (var er = 1; er < evtValues.length; er++) {
+        var eRow = evtValues[er];
+        if (!!eRow[evtColMap["isDeleted"]]) continue;
+        var rowId = String(eRow[evtColMap["id"]]);
+        var rowOrigSch = String(eRow[evtColMap["originatingScheduleId"]]);
+        var rowOcc = String(eRow[evtColMap["scheduleOccurrenceDate"]]);
 
-function validateSessionToken(ss, token) {
-  if (!token) return null;
-  var sessionSheet = ss.getSheetByName("Sessions");
-  var userSheet = ss.getSheetByName("Users");
-  if (!sessionSheet || !userSheet) return null;
+        if ((rowOrigSch === schId || rowId === prevDeterministicId) && rowOcc === nextDueDate) {
+          var eStatus = String(eRow[evtColMap["status"]]);
+          if (eStatus === "scheduled" || eStatus === "in_progress") {
+            if (evtColMap["status"] !== undefined) {
+              evtSheet.getRange(er + 1, evtColMap["status"] + 1).setValue("missed");
+            }
+            if (evtColMap["updatedAt"] !== undefined) {
+              evtSheet.getRange(er + 1, evtColMap["updatedAt"] + 1).setValue(nowMs);
+            }
+            eRow[evtColMap["status"]] = "missed";
+          }
+        }
+      }
 
-  var tokenHash = hashTokenServer(token);
-  var sessionRows = sessionSheet.getDataRange().getValues();
-  var now = new Date().getTime();
-
-  var foundSession = null;
-  for (var s = 1; s < sessionRows.length; s++) {
-    var row = sessionRows[s];
-    if (String(row[1]) === tokenHash) {
-      var isRevoked = !!row[7];
-      var expiresAt = parseInt(row[6], 10) || 0;
-      if (!isRevoked && expiresAt > now) {
-        foundSession = {
-          userId: String(row[2]),
-          role: String(row[4])
-        };
-        break;
+      // Advance schedule's nextDueDate to the subsequent interval
+      nextDueDate = subsequentIntervalDate;
+      if (schedColMap["nextDueDate"] !== undefined) {
+        schedSheet.getRange(scheduleRowIndex, schedColMap["nextDueDate"] + 1).setValue(nextDueDate);
+        scheduleUpdated = true;
       }
     }
-  }
 
-  if (!foundSession) return null;
+    var isDue = nextDueDate <= todayTehran;
+    var deterministicEventId = "evt-pm-" + schId + "-" + nextDueDate;
 
-  // Authoritatively load user from Users table
-  var userRows = userSheet.getDataRange().getValues();
-  for (var u = 1; u < userRows.length; u++) {
-    var uRow = userRows[u];
-    if (String(uRow[0]) === foundSession.userId) {
-      var isActive = !!uRow[6];
-      if (!isActive) return null; // Disabled account
-      return {
-        id: String(uRow[0]),
-        username: String(uRow[1]),
-        fullName: String(uRow[3]),
-        role: String(uRow[4]),
-        department: String(uRow[5]),
-        isActive: isActive,
-        updatedAt: parseInt(uRow[7], 10) || 0
+    // Check overdue status
+    if (isDue && nextDueDate < todayTehran && status !== "overdue") {
+      if (schedColMap["status"] !== undefined) {
+        schedSheet.getRange(scheduleRowIndex, schedColMap["status"] + 1).setValue("overdue");
+        scheduleUpdated = true;
+      }
+    } else if (!isDue && status === "overdue") {
+      if (schedColMap["status"] !== undefined) {
+        schedSheet.getRange(scheduleRowIndex, schedColMap["status"] + 1).setValue("active");
+        scheduleUpdated = true;
+      }
+    }
+
+    var lastGenDate = schedColMap["lastGeneratedDueDate"] !== undefined ? String(row[schedColMap["lastGeneratedDueDate"]] || "") : "";
+    if (isDue && !existingEventIds[deterministicEventId] && lastGenDate !== nextDueDate) {
+      // Build event row
+      var newEventRow = [];
+      var evtObj = {
+        id: deterministicEventId,
+        assetId: row[schedColMap["assetId"]],
+        assetName: row[schedColMap["assetName"]],
+        assetCode: row[schedColMap["assetCode"]],
+        title: "سرویس دوره‌ای PM: " + row[schedColMap["taskTitle"]],
+        type: "preventive",
+        status: "scheduled",
+        date: nextDueDate,
+        deadlineDate: nextDueDate,
+        hasDeadline: true,
+        originatingScheduleId: schId,
+        scheduleId: schId,
+        scheduleOccurrenceDate: nextDueDate,
+        affectedScheduleId: schId,
+        isAutomatedPM: true,
+        sideEffectsApplied: false,
+        isProvisionalTime: false,
+        technicianId: row[schedColMap["assignedRole"]] === "technician" ? "usr-2" : "usr-1",
+        technicianName: row[schedColMap["assignedRole"]] === "technician" ? "واحد تعمیرات مکانیک" : "مدیر فنی",
+        durationHours: 0,
+        description: row[schedColMap["description"]] || "انجام بازرسی و سرویس دوره‌ای نت",
+        solution: "",
+        partsUsedJson: "[]",
+        downtimeHours: 0,
+        approvedBy: "",
+        approvalNotes: "",
+        approvalDate: "",
+        updatedAt: nowMs,
+        isDeleted: false
       };
+
+      for (var ec = 0; ec < evtHeaders.length; ec++) {
+        var hName = evtHeaders[ec];
+        newEventRow.push(evtObj[hName] !== undefined ? evtObj[hName] : "");
+      }
+
+      evtSheet.appendRow(newEventRow);
+      existingEventIds[deterministicEventId] = true;
+      generatedCount++;
+
+      // Update schedule's lastGeneratedDueDate without advancing nextDueDate!
+      if (schedColMap["lastGeneratedDueDate"] !== undefined) {
+        schedSheet.getRange(scheduleRowIndex, schedColMap["lastGeneratedDueDate"] + 1).setValue(nextDueDate);
+        scheduleUpdated = true;
+      }
+    }
+
+    if (scheduleUpdated && schedColMap["updatedAt"] !== undefined) {
+      schedSheet.getRange(scheduleRowIndex, schedColMap["updatedAt"] + 1).setValue(nowMs);
     }
   }
 
-  return null;
+  return { generatedCount: generatedCount };
 }
-
-function revokeSessionToken(ss, token) {
-  if (!token) return;
-  var sessionSheet = ss.getSheetByName("Sessions");
-  if (!sessionSheet) return;
-
-  var tokenHash = hashTokenServer(token);
-  var sessionRows = sessionSheet.getDataRange().getValues();
-
-  for (var s = 1; s < sessionRows.length; s++) {
-    if (String(sessionRows[s][1]) === tokenHash) {
-      sessionSheet.getRange(s + 1, 8).setValue(true); // isRevoked = true
-      break;
-    }
-  }
-}
-
-function revokeAllUserSessions(ss, userId) {
-  if (!userId) return;
-  var sessionSheet = ss.getSheetByName("Sessions");
-  if (!sessionSheet) return;
-
-  var sessionRows = sessionSheet.getDataRange().getValues();
-  for (var s = 1; s < sessionRows.length; s++) {
-    if (String(sessionRows[s][2]) === String(userId)) {
-      sessionSheet.getRange(s + 1, 8).setValue(true);
-    }
-  }
-}
-
-// ============================================================================
-// REQUEST ROUTING (doGet & doPost)
-// ============================================================================
 
 function doGet(e) {
   var action = (e && e.parameter && e.parameter.action) || "ping";
@@ -364,13 +352,17 @@ function doGet(e) {
   if (action === "ping") {
     return jsonResponse({
       status: "ok",
-      system: "Timar CMMS Cloud API",
+      system: "Timar CMMS Water Treatment Plant Cloud API",
       tehranDate: getTehranDateString(new Date()),
       timestamp: new Date().getTime()
     });
   }
 
-  return jsonResponse({ error: "Method not allowed for GET" });
+  if (action === "syncPull") {
+    return jsonResponse(pullDeltaChanges(since));
+  }
+
+  return jsonResponse({ error: "Unknown action" });
 }
 
 function doPost(e) {
@@ -382,133 +374,24 @@ function doPost(e) {
   }
 
   try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
     var payload = JSON.parse(e.postData.contents);
     var action = payload.action;
 
-    // 1. Login
     if (action === "login") {
-      var username = String(payload.username || "").trim().toLowerCase();
-      var password = String(payload.password || "");
-      var authResult = handleLogin(ss, username, password);
+      var authResult = authenticateUser(payload.username, payload.password);
       return jsonResponse(authResult);
     }
 
-    // 1.1 Check if at least one active manager exists
-    if (action === "checkManagerExists") {
-      var uSheet = ss.getSheetByName("Users");
-      if (!uSheet) return jsonResponse({ hasManager: false });
-      var uData = uSheet.getDataRange().getValues();
-      var hasMgr = false;
-      for (var m = 1; m < uData.length; m++) {
-        if (String(uData[m][4]) === "manager" && !!uData[m][6]) {
-          hasMgr = true;
-          break;
-        }
-      }
-      return jsonResponse({ hasManager: hasMgr });
-    }
-
-    // 1.2 Bootstrap first manager (Allowed ONLY if NO active manager exists)
-    if (action === "bootstrapFirstManager") {
-      var uSheet = ss.getSheetByName("Users");
-      if (!uSheet) {
-        setupSheets();
-        uSheet = ss.getSheetByName("Users");
-      }
-      var uData = uSheet.getDataRange().getValues();
-      for (var b = 1; b < uData.length; b++) {
-        if (String(uData[b][4]) === "manager" && !!uData[b][6]) {
-          logSecurityEvent(ss, "BOOTSTRAP_REJECTED", "anonymous", "BLOCKED", "Manager already exists");
-          return jsonResponse({ success: false, error: "امکان ثبت مدیر اولیه وجود ندارد؛ مدیر سیستم قبلاً ایجاد شده است." });
-        }
-      }
-      var bUser = String(payload.username || "").trim().toLowerCase();
-      var bPass = String(payload.password || "");
-      if (!bUser || bPass.length < 12) {
-        return jsonResponse({ success: false, error: "نام کاربری و گذرواژه معتبر (حداقل ۱۲ کاراکتر) الزامی است." });
-      }
-      var bHash = hashPasswordServer(bPass);
-      var bId = "usr-mgr-" + new Date().getTime();
-      var bFull = String(payload.fullName || "مدیر ارشد سیستم");
-      var bDept = String(payload.department || "مدیریت فنی");
-      var bNow = new Date().getTime();
-      uSheet.appendRow([bId, bUser, bHash, bFull, "manager", bDept, true, bNow]);
-      logSecurityEvent(ss, "FIRST_MANAGER_BOOTSTRAPPED", bUser, "OK", "First manager created securely");
-      return jsonResponse({
-        success: true,
-        user: { id: bId, username: bUser, fullName: bFull, role: "manager", department: bDept, isActive: true, updatedAt: bNow }
-      });
-    }
-
-    // 2. Validate Session
-    if (action === "validateSession") {
-      var validUser = validateSessionToken(ss, payload.sessionToken);
-      if (validUser) {
-        return jsonResponse({ success: true, user: validUser });
-      }
-      return jsonResponse({ success: false, error: "Invalid or expired session" });
-    }
-
-    // 3. Logout
-    if (action === "logout") {
-      revokeSessionToken(ss, payload.sessionToken);
-      return jsonResponse({ success: true });
-    }
-
-    // 4. Create User (Manager only, race-safe username uniqueness)
-    if (action === "createUser") {
-      var actingMgr = validateSessionToken(ss, payload.sessionToken);
-      if (!actingMgr || actingMgr.role !== "manager") {
-        logSecurityEvent(ss, "UNAUTHORIZED_USER_CREATE", actingMgr ? actingMgr.username : "anonymous", "BLOCKED", "");
-        return jsonResponse({ success: false, error: "دسترسی غیرمجاز: تنها مدیر سیستم مجاز به ایجاد حساب کاربری است." });
-      }
-      var createRes = handleCreateUser(ss, payload.userData, actingMgr);
-      return jsonResponse(createRes);
-    }
-
-    // 5. Update User (Manager only)
-    if (action === "updateUser") {
-      var actingMgr = validateSessionToken(ss, payload.sessionToken);
-      if (!actingMgr || actingMgr.role !== "manager") {
-        return jsonResponse({ success: false, error: "دسترسی غیرمجاز: تنها مدیر سیستم مجاز به ویرایش کاربر است." });
-      }
-      var updateRes = handleUpdateUser(ss, payload.targetUserId, payload.updates, actingMgr);
-      return jsonResponse(updateRes);
-    }
-
-    // 6. Reset Password (Manager only)
-    if (action === "resetPassword") {
-      var actingMgr = validateSessionToken(ss, payload.sessionToken);
-      if (!actingMgr || actingMgr.role !== "manager") {
-        return jsonResponse({ success: false, error: "دسترسی غیرمجاز: تنها مدیر سیستم مجاز به بازنشانی رمز عبور است." });
-      }
-      var resetRes = handleResetPassword(ss, payload.targetUserId, payload.newPassword, actingMgr);
-      return jsonResponse(resetRes);
-    }
-
-    // 7. Secure syncPush (Requires valid session, enforces role-based mutation authority)
     if (action === "syncPush") {
-      var actingUser = validateSessionToken(ss, payload.sessionToken);
-      if (!actingUser) {
-        logSecurityEvent(ss, "SYNC_PUSH_REJECTED", "anonymous", "BLOCKED", "Missing or invalid session token");
-        return jsonResponse({ error: "Unauthorized: A valid session token is required." });
-      }
-      var pushResult = applyMutations(ss, payload.mutations || [], actingUser);
+      var pushResult = applyMutations(payload.mutations || [], payload.clientUser || "Unknown");
       processDueSchedules();
       return jsonResponse(pushResult);
     }
 
-    // 8. Secure syncFull (Requires valid session)
     if (action === "syncFull") {
-      var actingUser = validateSessionToken(ss, payload.sessionToken);
-      if (!actingUser) {
-        logSecurityEvent(ss, "SYNC_FULL_REJECTED", "anonymous", "BLOCKED", "Missing or invalid session token");
-        return jsonResponse({ error: "Unauthorized: A valid session token is required." });
-      }
-      var pushRes = applyMutations(ss, payload.mutations || [], actingUser);
+      var pushRes = applyMutations(payload.mutations || [], payload.clientUser || "Unknown");
       processDueSchedules();
-      var delta = pullDeltaChanges(ss, payload.sinceTimestamp || 0);
+      var delta = pullDeltaChanges(payload.sinceTimestamp || 0);
       return jsonResponse({
         push: pushRes,
         pull: delta,
@@ -525,211 +408,39 @@ function doPost(e) {
   }
 }
 
-// ============================================================================
-// AUTHENTICATION & USER MANAGEMENT LOGIC
-// ============================================================================
-
-function handleLogin(ss, username, password) {
+function authenticateUser(username, password) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName("Users");
   if (!sheet) return { success: false, message: "Users table not found" };
 
   var data = sheet.getDataRange().getValues();
   for (var i = 1; i < data.length; i++) {
     var row = data[i];
-    var rowUser = String(row[1]).trim().toLowerCase();
-    if (rowUser === username) {
-      var storedHash = String(row[2]).trim();
-      var isVerified = verifyPasswordServer(password, storedHash);
-
-      if (isVerified) {
-        var isActive = !!row[6];
-        if (!isActive) {
-          logSecurityEvent(ss, "LOGIN_FAILED", username, "BLOCKED", "Account is disabled");
-          return { success: false, message: "این حساب کاربری غیرفعال شده است. لطفاً با مدیر سیستم تماس بگیرید." };
-        }
-
-        // If stored was legacy plaintext, automatically upgrade to salted hash
-        if (storedHash.indexOf("sha256:") !== 0 && storedHash.indexOf("pbkdf2:") !== 0) {
-          var upgradedHash = hashPasswordServer(password);
-          sheet.getRange(i + 1, 3).setValue(upgradedHash);
-        }
-
-        var safeUser = {
-          id: String(row[0]),
-          username: String(row[1]),
-          fullName: String(row[3]),
-          role: String(row[4]),
-          department: String(row[5]),
-          isActive: true,
-          updatedAt: parseInt(row[7], 10) || new Date().getTime()
-        };
-
-        var sessionInfo = createSessionRecord(ss, safeUser);
-        logSecurityEvent(ss, "LOGIN_SUCCESS", username, "OK", "");
-
+    if (String(row[1]).toLowerCase() === String(username).toLowerCase().trim()) {
+      if (String(row[2]) === String(password).trim()) {
+        if (!row[6]) return { success: false, message: "Account is disabled" };
         return {
           success: true,
-          sessionToken: sessionInfo.sessionToken,
-          expiresAt: sessionInfo.expiresAt,
-          user: safeUser
+          user: {
+            id: row[0],
+            username: row[1],
+            fullName: row[3],
+            role: row[4],
+            department: row[5],
+            isActive: row[6],
+            updatedAt: row[7]
+          }
         };
       } else {
-        logSecurityEvent(ss, "LOGIN_FAILED", username, "FAIL", "Invalid credentials");
-        return { success: false, message: "نام کاربری یا کلمه عبور نادرست است." };
+        return { success: false, message: "Invalid password" };
       }
     }
   }
-
-  logSecurityEvent(ss, "LOGIN_FAILED", username, "FAIL", "User not found");
-  return { success: false, message: "نام کاربری یا کلمه عبور نادرست است." };
+  return { success: false, message: "User not found" };
 }
 
-function handleCreateUser(ss, userData, actingMgr) {
-  var sheet = ss.getSheetByName("Users");
-  if (!sheet) return { success: false, message: "Users table not found" };
-
-  var normalized = String(userData.username || "").trim().toLowerCase();
-  if (normalized.length < 3 || normalized.length > 30) {
-    return { success: false, message: "نام کاربری باید بین ۳ تا ۳۰ کاراکتر باشد." };
-  }
-
-  var password = String(userData.password || "");
-  if (password.length < 12) {
-    return { success: false, message: "رمز عبور برای حساب‌های جدید باید حداقل ۱۲ کاراکتر باشد." };
-  }
-
-  var role = userData.role === "manager" ? "manager" : "technician";
-
-  // Atomically check for duplicates (including disabled accounts)
-  var data = sheet.getDataRange().getValues();
-  for (var i = 1; i < data.length; i++) {
-    if (String(data[i][1]).trim().toLowerCase() === normalized) {
-      return { success: false, message: "این نام کاربری قبلاً در سامانه ثبت شده است." };
-    }
-  }
-
-  var now = new Date().getTime();
-  var newId = "usr-" + now + "-" + Utilities.getUuid().substring(0, 4);
-  var pHash = hashPasswordServer(password);
-
-  var row = [
-    newId,
-    normalized,
-    pHash,
-    String(userData.fullName || "").trim(),
-    role,
-    String(userData.department || "").trim(),
-    userData.isActive !== undefined ? !!userData.isActive : true,
-    now
-  ];
-
-  sheet.appendRow(row);
-  logSecurityEvent(ss, "USER_CREATED", normalized, "OK", "Created by " + actingMgr.username);
-
-  return {
-    success: true,
-    user: {
-      id: newId,
-      username: normalized,
-      fullName: String(userData.fullName || "").trim(),
-      role: role,
-      department: String(userData.department || "").trim(),
-      isActive: userData.isActive !== undefined ? !!userData.isActive : true,
-      updatedAt: now
-    }
-  };
-}
-
-function handleUpdateUser(ss, targetUserId, updates, actingMgr) {
-  var sheet = ss.getSheetByName("Users");
-  if (!sheet) return { success: false, message: "Users table not found" };
-
-  var data = sheet.getDataRange().getValues();
-  var rowIndex = -1;
-  var targetRow = null;
-
-  var activeManagerCount = 0;
-  for (var i = 1; i < data.length; i++) {
-    if (String(data[i][4]) === "manager" && !!data[i][6]) {
-      activeManagerCount++;
-    }
-    if (String(data[i][0]) === String(targetUserId)) {
-      rowIndex = i + 1;
-      targetRow = data[i];
-    }
-  }
-
-  if (rowIndex <= 0 || !targetRow) {
-    return { success: false, message: "کاربر مورد نظر یافت نشد." };
-  }
-
-  // Prevent demoting or deactivating the last active manager
-  var isTargetActiveManager = String(targetRow[4]) === "manager" && !!targetRow[6];
-  if (isTargetActiveManager && activeManagerCount <= 1) {
-    if (updates.isActive === false) {
-      return { success: false, message: "امکان غیرفعال‌سازی تنها مدیر فعال سیستم وجود ندارد." };
-    }
-    if (updates.role && updates.role !== "manager") {
-      return { success: false, message: "امکان تنزل رتبه تنها مدیر فعال سیستم وجود ندارد." };
-    }
-  }
-
-  var now = new Date().getTime();
-  if (updates.fullName !== undefined) sheet.getRange(rowIndex, 4).setValue(String(updates.fullName).trim());
-  if (updates.role !== undefined) sheet.getRange(rowIndex, 5).setValue(updates.role === "manager" ? "manager" : "technician");
-  if (updates.department !== undefined) sheet.getRange(rowIndex, 6).setValue(String(updates.department).trim());
-  if (updates.isActive !== undefined) {
-    sheet.getRange(rowIndex, 7).setValue(!!updates.isActive);
-    if (!updates.isActive) {
-      revokeAllUserSessions(ss, targetUserId);
-    }
-  }
-  sheet.getRange(rowIndex, 8).setValue(now);
-
-  logSecurityEvent(ss, "USER_UPDATED", targetUserId, "OK", "Updated by " + actingMgr.username);
-
-  return {
-    success: true,
-    user: {
-      id: String(targetRow[0]),
-      username: String(targetRow[1]),
-      fullName: updates.fullName !== undefined ? String(updates.fullName).trim() : String(targetRow[3]),
-      role: updates.role !== undefined ? updates.role : String(targetRow[4]),
-      department: updates.department !== undefined ? String(updates.department).trim() : String(targetRow[5]),
-      isActive: updates.isActive !== undefined ? !!updates.isActive : !!targetRow[6],
-      updatedAt: now
-    }
-  };
-}
-
-function handleResetPassword(ss, targetUserId, newPassword, actingMgr) {
-  var sheet = ss.getSheetByName("Users");
-  if (!sheet) return { success: false, message: "Users table not found" };
-
-  if (!newPassword || newPassword.length < 12) {
-    return { success: false, message: "رمز عبور جدید باید حداقل ۱۲ کاراکتر باشد." };
-  }
-
-  var data = sheet.getDataRange().getValues();
-  for (var i = 1; i < data.length; i++) {
-    if (String(data[i][0]) === String(targetUserId)) {
-      var pHash = hashPasswordServer(newPassword);
-      sheet.getRange(i + 1, 3).setValue(pHash);
-      sheet.getRange(i + 1, 8).setValue(new Date().getTime());
-      revokeAllUserSessions(ss, targetUserId);
-      logSecurityEvent(ss, "PASSWORD_RESET", data[i][1], "OK", "Reset by " + actingMgr.username);
-      return { success: true };
-    }
-  }
-
-  return { success: false, message: "کاربر یافت نشد." };
-}
-
-// ============================================================================
-// AUTHORIZED SYNCHRONIZATION (Push & Pull)
-// ============================================================================
-
-function pullDeltaChanges(ss, sinceTimestamp) {
+function pullDeltaChanges(sinceTimestamp) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
   var tables = ["Users", "Assets", "SubAssets", "Events", "Schedules", "Inventory"];
   var result = {
     serverTimestamp: new Date().getTime(),
@@ -753,11 +464,6 @@ function pullDeltaChanges(ss, sinceTimestamp) {
       var obj = {};
       for (var c = 0; c < headers.length; c++) {
         var h = headers[c];
-        // CRITICAL SECURITY RULE: Never leak password hashes or salts to clients!
-        if (h === "password" || h === "passwordHash" || h === "salt") {
-          continue;
-        }
-
         var val = row[c];
         if (h === "partsUsedJson" && typeof val === "string") {
           try { obj["partsUsed"] = JSON.parse(val); } catch(e) { obj["partsUsed"] = []; }
@@ -777,7 +483,8 @@ function pullDeltaChanges(ss, sinceTimestamp) {
   return result;
 }
 
-function applyMutations(ss, mutations, actingUser) {
+function applyMutations(mutations, clientUser) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
   var processed = 0;
   var appliedIds = [];
   var serverNow = new Date().getTime();
@@ -796,19 +503,6 @@ function applyMutations(ss, mutations, actingUser) {
     var sheetName = sheetMap[mut.entityType];
     if (!sheetName) continue;
 
-    // AUTHORIZATION ENFORCEMENT ON BACKEND:
-    // 1. Technicians cannot mutate users table
-    if (mut.entityType === "users" && actingUser.role !== "manager") {
-      logSecurityEvent(ss, "UNAUTHORIZED_MUTATION", actingUser.username, "BLOCKED", "Technician attempted user mutation");
-      continue; // Skip without adding to appliedIds
-    }
-
-    // 2. Technicians cannot create or delete schedules
-    if (mut.entityType === "schedules" && (mut.action === "create" || mut.action === "delete") && actingUser.role !== "manager") {
-      logSecurityEvent(ss, "UNAUTHORIZED_MUTATION", actingUser.username, "BLOCKED", "Technician attempted schedule " + mut.action);
-      continue;
-    }
-
     var sheet = ss.getSheetByName(sheetName);
     if (!sheet) continue;
 
@@ -818,18 +512,14 @@ function applyMutations(ss, mutations, actingUser) {
 
     for (var r = 1; r < data.length; r++) {
       if (String(data[r][0]) === String(mut.entityId)) {
-        rowIndex = r + 1;
+        rowIndex = r + 1; // 1-indexed sheet row
         break;
       }
     }
 
     var recordData = mut.data || {};
     recordData.id = mut.entityId;
-    recordData.updatedAt = serverNow;
-
-    // Prevent generic mutations from altering password hashes
-    delete recordData.password;
-    delete recordData.passwordHash;
+    recordData.updatedAt = serverNow; // Authoritative server timestamp
 
     if (mut.action === "delete") {
       recordData.isDeleted = true;
@@ -839,10 +529,12 @@ function applyMutations(ss, mutations, actingUser) {
     if (mut.entityType === "events" && recordData.status === "completed") {
       var isAlreadyApplied = !!recordData.sideEffectsApplied;
       if (!isAlreadyApplied) {
+        // Advance linked schedule if requested
         var targetScheduleId = recordData.affectedScheduleId || recordData.originatingScheduleId;
         if (targetScheduleId) {
           advanceScheduleOnServer(ss, targetScheduleId, recordData.date || getTehranDateString(new Date()), serverNow);
         }
+        // Deduct inventory parts on server
         if (recordData.partsUsed && recordData.partsUsed.length > 0) {
           deductInventoryOnServer(ss, recordData.partsUsed, serverNow);
         }
@@ -871,10 +563,11 @@ function applyMutations(ss, mutations, actingUser) {
     processed++;
   }
 
+  // Log sync event
   var logSheet = ss.getSheetByName("SyncLog");
   if (logSheet) {
     logSheet.appendRow([
-      new Date(), actingUser.fullName + " (" + actingUser.role + ")", "syncPush", processed, "Success"
+      new Date(), clientUser, "syncPush", processed, "Success"
     ]);
   }
 
@@ -934,121 +627,6 @@ function deductInventoryOnServer(ss, partsUsed, serverNow) {
       }
     }
   }
-}
-
-function processDueSchedules() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var schedSheet = ss.getSheetByName("Schedules");
-  var evtSheet = ss.getSheetByName("Events");
-  if (!schedSheet || !evtSheet) return { generatedCount: 0 };
-
-  var schedValues = schedSheet.getDataRange().getValues();
-  if (schedValues.length <= 1) return { generatedCount: 0 };
-  var schedHeaders = schedValues[0];
-  var schedColMap = {};
-  for (var c = 0; c < schedHeaders.length; c++) schedColMap[schedHeaders[c]] = c;
-
-  var evtValues = evtSheet.getDataRange().getValues();
-  var evtHeaders = evtValues[0];
-  var evtColMap = {};
-  for (var e = 0; e < evtHeaders.length; e++) evtColMap[evtHeaders[e]] = e;
-
-  var existingEventIds = {};
-  for (var r = 1; r < evtValues.length; r++) {
-    var idVal = String(evtValues[r][evtColMap["id"] || 0]);
-    if (idVal) existingEventIds[idVal] = true;
-  }
-
-  var todayTehran = getTehranDateString(new Date());
-  var nowMs = new Date().getTime();
-  var generatedCount = 0;
-
-  for (var s = 1; s < schedValues.length; s++) {
-    var row = schedValues[s];
-    var isDeleted = !!row[schedColMap["isDeleted"]];
-    var status = String(row[schedColMap["status"]]);
-    if (isDeleted || status === "paused") continue;
-
-    var schId = String(row[schedColMap["id"]]);
-    var nextDueDate = String(row[schedColMap["nextDueDate"]]);
-    if (!nextDueDate) continue;
-
-    var intervalType = String(row[schedColMap["intervalType"]] || "months");
-    var intervalValue = parseInt(row[schedColMap["intervalValue"]], 10) || 1;
-    var scheduleRowIndex = s + 1;
-    var scheduleUpdated = false;
-
-    var isDue = nextDueDate <= todayTehran;
-    var deterministicEventId = "evt-pm-" + schId + "-" + nextDueDate;
-
-    if (isDue && nextDueDate < todayTehran && status !== "overdue") {
-      if (schedColMap["status"] !== undefined) {
-        schedSheet.getRange(scheduleRowIndex, schedColMap["status"] + 1).setValue("overdue");
-        scheduleUpdated = true;
-      }
-    } else if (!isDue && status === "overdue") {
-      if (schedColMap["status"] !== undefined) {
-        schedSheet.getRange(scheduleRowIndex, schedColMap["status"] + 1).setValue("active");
-        scheduleUpdated = true;
-      }
-    }
-
-    var lastGenDate = schedColMap["lastGeneratedDueDate"] !== undefined ? String(row[schedColMap["lastGeneratedDueDate"]] || "") : "";
-    if (isDue && !existingEventIds[deterministicEventId] && lastGenDate !== nextDueDate) {
-      var newEventRow = [];
-      var evtObj = {
-        id: deterministicEventId,
-        assetId: row[schedColMap["assetId"]],
-        assetName: row[schedColMap["assetName"]],
-        assetCode: row[schedColMap["assetCode"]],
-        title: "سرویس دوره‌ای PM: " + row[schedColMap["taskTitle"]],
-        type: "preventive",
-        status: "scheduled",
-        date: nextDueDate,
-        deadlineDate: nextDueDate,
-        hasDeadline: true,
-        originatingScheduleId: schId,
-        scheduleId: schId,
-        scheduleOccurrenceDate: nextDueDate,
-        affectedScheduleId: schId,
-        isAutomatedPM: true,
-        sideEffectsApplied: false,
-        isProvisionalTime: false,
-        technicianId: row[schedColMap["assignedRole"]] === "technician" ? "usr-2" : "usr-1",
-        technicianName: row[schedColMap["assignedRole"]] === "technician" ? "واحد تعمیرات مکانیک" : "مدیر فنی",
-        durationHours: 0,
-        description: row[schedColMap["description"]] || "انجام بازرسی و سرویس دوره‌ای نت",
-        solution: "",
-        partsUsedJson: "[]",
-        downtimeHours: 0,
-        approvedBy: "",
-        approvalNotes: "",
-        approvalDate: "",
-        updatedAt: nowMs,
-        isDeleted: false
-      };
-
-      for (var ec = 0; ec < evtHeaders.length; ec++) {
-        var hName = evtHeaders[ec];
-        newEventRow.push(evtObj[hName] !== undefined ? evtObj[hName] : "");
-      }
-
-      evtSheet.appendRow(newEventRow);
-      existingEventIds[deterministicEventId] = true;
-      generatedCount++;
-
-      if (schedColMap["lastGeneratedDueDate"] !== undefined) {
-        schedSheet.getRange(scheduleRowIndex, schedColMap["lastGeneratedDueDate"] + 1).setValue(nextDueDate);
-        scheduleUpdated = true;
-      }
-    }
-
-    if (scheduleUpdated && schedColMap["updatedAt"] !== undefined) {
-      schedSheet.getRange(scheduleRowIndex, schedColMap["updatedAt"] + 1).setValue(nowMs);
-    }
-  }
-
-  return { generatedCount: generatedCount };
 }
 
 function jsonResponse(data) {
