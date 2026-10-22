@@ -129,11 +129,12 @@ export class SyncEngine {
       const mutations = await db.getAll('syncQueue');
       const lastSyncSetting = await db.get('settings', 'lastSyncTimestamp');
       const lastSyncTimestamp = typeof lastSyncSetting?.value === 'number' ? lastSyncSetting.value : 0;
-      const sessionToken = AuthService.getSessionToken();
+      const actingUser = AuthService.getCurrentUser();
 
       const payload = {
         action: 'syncFull',
-        sessionToken,
+        actingUser,
+        clientUser: actingUser?.username || 'Unknown',
         mutations,
         sinceTimestamp: lastSyncTimestamp,
       };
