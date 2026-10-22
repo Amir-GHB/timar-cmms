@@ -1,10 +1,8 @@
 import { getDB } from './db';
-import type { User, AuthSession, Role, UserCredential, SessionRecord } from '../types';
+import type { User, Role, UserCredential } from '../types';
 import {
   hashPassword,
   verifyPassword,
-  generateSecureToken,
-  hashToken,
   normalizeUsername,
   validatePasswordStrength,
   validateUsernameFormat,
@@ -12,11 +10,10 @@ import {
 import { TimeService } from '../utils/timeService';
 import { DEFAULT_APPS_SCRIPT_URL } from '../config/constants';
 
-const SESSION_STORAGE_KEY = 'timar_auth_session';
-const SESSION_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const AUTH_USER_STORAGE_KEY = 'timar_auth_user';
 
 export class AuthService {
-  private static activeSession: AuthSession | null = null;
+  private static activeUser: User | null = null;
   private static listeners: ((user: User | null) => void)[] = [];
 
   public static subscribe(listener: (user: User | null) => void): () => void {
@@ -50,150 +47,47 @@ export class AuthService {
   }
 
   /**
-   * Loads persisted session from localStorage, verifies cryptographic tokens in IndexedDB,
-   * and authoritatively validates with the backend when online.
+   * Restores the last locally cached user without server session tokens.
+   * This is an intentionally temporary tokenless implementation.
    */
-  public static async init(scriptUrl?: string): Promise<User | null> {
+  public static async init(_scriptUrl?: string): Promise<User | null> {
     try {
-      const stored = localStorage.getItem(SESSION_STORAGE_KEY);
+      const stored = localStorage.getItem(AUTH_USER_STORAGE_KEY);
       if (!stored) {
-        this.activeSession = null;
+        this.activeUser = null;
         this.notify(null);
         return null;
       }
 
-      const parsed: AuthSession = JSON.parse(stored);
-      if (!parsed || !parsed.token || !parsed.user) {
-        this.clearSession();
+      const parsed = JSON.parse(stored) as User;
+      if (!parsed?.id) {
+        this.clearAuthState();
         return null;
       }
 
-      const now = TimeService.now();
-      if (parsed.expiresAt && parsed.expiresAt < now) {
-        this.clearSession();
-        return null;
-      }
-
-      // Verify that local cryptographic session record exists and has not been revoked
       const db = await getDB();
-      const tHash = await hashToken(parsed.token);
-      const sessionRecord = await db.getFromIndex('sessions', 'by-tokenHash', tHash);
-      if (!sessionRecord || sessionRecord.isRevoked || sessionRecord.expiresAt < now) {
-        this.clearSession();
+      const localUser = await db.get('users', parsed.id);
+      if (!localUser || localUser.isActive === false) {
+        this.clearAuthState();
         return null;
       }
 
-      // Verify user exists and is active locally
-      const localUser = await db.get('users', parsed.user.id);
-      if (!localUser || !localUser.isActive) {
-        this.clearSession();
-        return null;
-      }
-
-      this.activeSession = {
-        ...parsed,
-        user: localUser,
-      };
-
-      // Determine backend endpoint
-      const endpoint = scriptUrl || (await this.getConfiguredScriptUrl());
-
-      // If online and backend is configured, authoritatively validate session with server
-      if (endpoint && typeof navigator !== 'undefined' && navigator.onLine) {
-        const serverCheck = await this.validateServerSession(endpoint);
-        if (!serverCheck.isValid) {
-          this.clearSession();
-          return null;
-        }
-        if (serverCheck.user) {
-          this.activeSession.user = serverCheck.user;
-          this.notify(serverCheck.user);
-          return serverCheck.user;
-        }
-      }
-
-      this.notify(this.activeSession.user);
-      return this.activeSession.user;
+      this.activeUser = localUser;
+      localStorage.setItem(AUTH_USER_STORAGE_KEY, JSON.stringify(localUser));
+      this.notify(localUser);
+      return localUser;
     } catch {
-      this.clearSession();
+      this.clearAuthState();
       return null;
     }
-  }
-
-  public static getSession(): AuthSession | null {
-    if (!this.activeSession) return null;
-    if (this.activeSession.expiresAt < TimeService.now()) {
-      this.clearSession();
-      return null;
-    }
-    return this.activeSession;
   }
 
   public static getCurrentUser(): User | null {
-    const session = this.getSession();
-    return session ? session.user : null;
-  }
-
-  public static getSessionToken(): string | null {
-    const session = this.getSession();
-    return session ? session.token : null;
-  }
-
-  /**
-   * Validates active session against server when online.
-   * If server rejects or token is revoked, session is invalidated.
-   */
-  public static async validateServerSession(scriptUrl: string): Promise<{ isValid: boolean; user?: User }> {
-    const session = this.getSession();
-    if (!session) return { isValid: false };
-
-    if (!scriptUrl || (typeof navigator !== 'undefined' && !navigator.onLine)) {
-      // Offline fallback: validate local cryptographic session record and expiration
-      const db = await getDB();
-      const tHash = await hashToken(session.token);
-      const record = await db.getFromIndex('sessions', 'by-tokenHash', tHash);
-      if (!record || record.isRevoked || record.expiresAt < TimeService.now()) {
-        return { isValid: false };
-      }
-      return { isValid: true, user: session.user };
+    if (this.activeUser?.isActive === false) {
+      this.clearAuthState();
+      return null;
     }
-
-    try {
-      const response = await fetch(scriptUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({
-          action: 'validateSession',
-          sessionToken: session.token,
-        }),
-      });
-
-      if (!response.ok) {
-        // Network or HTTP status issue: fallback to local verified session token
-        return { isValid: true, user: session.user };
-      }
-
-      const result = await response.json();
-      if (result.success && result.user) {
-        // Refresh authoritative user from server
-        this.activeSession = {
-          ...session,
-          user: result.user,
-        };
-        localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(this.activeSession));
-        const db = await getDB();
-        await db.put('users', result.user);
-        this.notify(result.user);
-        return { isValid: true, user: result.user };
-      } else {
-        // Explicit rejection or revoked session on server
-        await this.logout(scriptUrl);
-        return { isValid: false };
-      }
-    } catch {
-      // Offline / transient network error: fallback to local cryptographic token record
-      return { isValid: true, user: session.user };
-    }
+    return this.activeUser;
   }
 
   /**
@@ -239,12 +133,8 @@ export class AuthService {
             const db = await getDB();
             await db.put('users', result.user);
 
-            // Use token from server or generate a secure cryptographic token
-            const token = result.sessionToken || generateSecureToken();
+            // Cache a local password hash for offline login, without creating a token.
             const now = TimeService.now();
-            const expiresAt = result.expiresAt || (now + SESSION_DURATION_MS);
-
-            // Cache salted PBKDF2 hash of this valid password locally for seamless offline login
             const pHash = await hashPassword(password);
             await db.put('userCredentials', {
               userId: result.user.id,
@@ -253,28 +143,8 @@ export class AuthService {
               updatedAt: now,
             });
 
-            // Record cryptographic session in local sessions store
-            const tHash = await hashToken(token);
-            await db.put('sessions', {
-              id: `sess-${now}-${Math.random().toString(36).substring(2, 6)}`,
-              tokenHash: tHash,
-              userId: result.user.id,
-              username: result.user.username,
-              role: result.user.role,
-              createdAt: now,
-              expiresAt,
-              isRevoked: false,
-            });
-
-            const session: AuthSession = {
-              token,
-              user: result.user,
-              expiresAt,
-              createdAt: now,
-            };
-
-            this.activeSession = session;
-            localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+            this.activeUser = result.user;
+            localStorage.setItem(AUTH_USER_STORAGE_KEY, JSON.stringify(result.user));
             this.notify(result.user);
             return { success: true, user: result.user };
           }
@@ -327,77 +197,22 @@ export class AuthService {
       return { success: false, message: 'این حساب کاربری غیرفعال شده است. لطفاً با مدیر سیستم تماس بگیرید.' };
     }
 
-    const token = generateSecureToken();
-    const tHash = await hashToken(token);
-    const now = TimeService.now();
-    const expiresAt = now + SESSION_DURATION_MS;
-
-    const sessionRecord: SessionRecord = {
-      id: `sess-${now}-${Math.random().toString(36).substring(2, 6)}`,
-      tokenHash: tHash,
-      userId: user.id,
-      username: user.username,
-      role: user.role,
-      createdAt: now,
-      expiresAt,
-      isRevoked: false,
-    };
-    await db.put('sessions', sessionRecord);
-
-    const session: AuthSession = {
-      token,
-      user,
-      expiresAt,
-      createdAt: now,
-    };
-
-    this.activeSession = session;
-    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+    this.activeUser = user;
+    localStorage.setItem(AUTH_USER_STORAGE_KEY, JSON.stringify(user));
     this.notify(user);
 
     return { success: true, user };
   }
 
-  /**
-   * Logs out the current session and revokes tokens.
-   */
-  public static async logout(scriptUrl?: string): Promise<void> {
-    const session = this.activeSession;
-    if (session && scriptUrl && typeof navigator !== 'undefined' && navigator.onLine) {
-      try {
-        await fetch(scriptUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-          body: JSON.stringify({
-            action: 'logout',
-            sessionToken: session.token,
-          }),
-        });
-      } catch {
-        // Best effort
-      }
-    }
-
-    if (session) {
-      try {
-        const db = await getDB();
-        const tHash = await hashToken(session.token);
-        const record = await db.getFromIndex('sessions', 'by-tokenHash', tHash);
-        if (record) {
-          record.isRevoked = true;
-          await db.put('sessions', record);
-        }
-      } catch {
-        // Fallback
-      }
-    }
-
-    this.clearSession();
+  /** Clears the locally cached authenticated user. */
+  public static async logout(_scriptUrl?: string): Promise<void> {
+    this.clearAuthState();
   }
 
-  private static clearSession(): void {
-    this.activeSession = null;
-    localStorage.removeItem(SESSION_STORAGE_KEY);
+  private static clearAuthState(): void {
+    this.activeUser = null;
+    localStorage.removeItem(AUTH_USER_STORAGE_KEY);
+    localStorage.removeItem('timar_auth_session');
     this.notify(null);
   }
 
@@ -437,15 +252,14 @@ export class AuthService {
     const normalized = normalizeUsername(userData.username);
 
     // Call server if configured and online
-    const token = this.getSessionToken();
-    if (scriptUrl && scriptUrl.startsWith('http') && token && typeof navigator !== 'undefined' && navigator.onLine) {
+    if (scriptUrl && scriptUrl.startsWith('http') && typeof navigator !== 'undefined' && navigator.onLine) {
       try {
         const response = await fetch(scriptUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'text/plain;charset=utf-8' },
           body: JSON.stringify({
             action: 'createUser',
-            sessionToken: token,
+            actingUser: currentUser,
             userData: {
               fullName: userData.fullName.trim(),
               username: normalized,
@@ -524,15 +338,14 @@ export class AuthService {
       return { success: false, message: passCheck.message || 'رمز عبور حداقل باید ۱۲ کاراکتر باشد.' };
     }
 
-    const token = this.getSessionToken();
-    if (scriptUrl && scriptUrl.startsWith('http') && token && typeof navigator !== 'undefined' && navigator.onLine) {
+    if (scriptUrl && scriptUrl.startsWith('http') && typeof navigator !== 'undefined' && navigator.onLine) {
       try {
         const response = await fetch(scriptUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'text/plain;charset=utf-8' },
           body: JSON.stringify({
             action: 'resetPassword',
-            sessionToken: token,
+            actingUser: currentUser,
             targetUserId,
             newPassword,
           }),
@@ -559,14 +372,7 @@ export class AuthService {
     cred.updatedAt = TimeService.now();
     await db.put('userCredentials', cred);
 
-    // Revoke all existing sessions for this user
-    const sessions = await db.getAllFromIndex('sessions', 'by-user', targetUserId);
-    for (const s of sessions) {
-      s.isRevoked = true;
-      await db.put('sessions', s);
-    }
-
-    return { success: true, message: 'رمز عبور با موفقیت به‌روزرسانی شد و نشست‌های قبلی کاربر باطل گردید.' };
+    return { success: true, message: 'رمز عبور با موفقیت به‌روزرسانی شد.' };
   }
 
   /**
@@ -602,15 +408,14 @@ export class AuthService {
       }
     }
 
-    const token = this.getSessionToken();
-    if (scriptUrl && scriptUrl.startsWith('http') && token && typeof navigator !== 'undefined' && navigator.onLine) {
+    if (scriptUrl && scriptUrl.startsWith('http') && typeof navigator !== 'undefined' && navigator.onLine) {
       try {
         const response = await fetch(scriptUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'text/plain;charset=utf-8' },
           body: JSON.stringify({
             action: 'updateUser',
-            sessionToken: token,
+            actingUser: currentUser,
             targetUserId,
             updates,
           }),
@@ -636,13 +441,8 @@ export class AuthService {
     };
     await db.put('users', updated);
 
-    // If account was deactivated, revoke all their sessions
-    if (updates.isActive === false) {
-      const sessions = await db.getAllFromIndex('sessions', 'by-user', targetUserId);
-      for (const s of sessions) {
-        s.isRevoked = true;
-        await db.put('sessions', s);
-      }
+    if (this.activeUser?.id === targetUserId && updates.isActive === false) {
+      this.clearAuthState();
     }
 
     return { success: true, message: 'اطلاعات کاربر با موفقیت به‌روزرسانی شد.', updatedUser: updated };
