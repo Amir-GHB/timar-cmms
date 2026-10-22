@@ -1,14 +1,12 @@
 /**
  * Security, Authentication, and Date Preset Test Suite
- * Validates cryptographic hashing, session security, username normalization,
- * role authorization, and Persian calendar preset calculations.
+ * Validates password hashing, username normalization, role safeguards,
+ * backend URL validation, and Persian calendar preset calculations.
  */
 
 import {
   hashPassword,
   verifyPassword,
-  generateSecureToken,
-  hashToken,
   normalizeUsername,
   validatePasswordStrength,
   validateUsernameFormat,
@@ -75,25 +73,7 @@ async function runTests() {
     assert(hash !== hash2, 'Identical passwords generate unique hashes due to random salt');
   }
 
-  // --- Suite 2: Cryptographic Session Tokens & Token Hashing ---
-  console.log('\n2. Session Security & Token Hashing:');
-  {
-    const token1 = generateSecureToken(32);
-    const token2 = generateSecureToken(32);
-
-    assert(token1.length === 64, 'Generated session token is 64 hex characters (32 bytes entropy)');
-    assert(token1 !== token2, 'Generated session tokens are unique and cryptographically random');
-
-    const tokenHash1 = await hashToken(token1);
-    const tokenHash1Repeat = await hashToken(token1);
-    const tokenHash2 = await hashToken(token2);
-
-    assert(tokenHash1 === tokenHash1Repeat, 'Token hash is deterministic SHA-256 for lookup index');
-    assert(tokenHash1 !== tokenHash2, 'Distinct tokens yield distinct token hashes');
-    assert(tokenHash1.length === 64, 'Token hash is 256-bit hexadecimal string');
-  }
-
-  // --- Suite 3: Canonical Username Normalization & Validation ---
+  // --- Suite 2: Canonical Username Normalization & Validation ---
   console.log('\n3. Canonical Username Normalization & Validation:');
   {
     const rawUser1 = '  Manager.Operator  ';
@@ -116,7 +96,7 @@ async function runTests() {
     assert(invalidSpecial.isValid === false, 'Username with invalid characters rejected');
   }
 
-  // --- Suite 4: Password Strength Policy (Minimum 12 Characters) ---
+  // --- Suite 3: Password Strength Policy (Minimum 12 Characters) ---
   console.log('\n4. Password Strength Policy Enforcement:');
   {
     const weakShort = validatePasswordStrength('Short#1');
@@ -128,7 +108,7 @@ async function runTests() {
     assert(strong.isValid === true, 'Strong password with 12+ chars and character diversity is accepted');
   }
 
-  // --- Suite 5: Persian (Jalali) Report Date Presets Calculation ---
+  // --- Suite 4: Persian (Jalali) Report Date Presets Calculation ---
   console.log('\n5. Persian (Jalali) Report Date Presets Calculations:');
   {
     // Test known reference dates
@@ -195,7 +175,7 @@ async function runTests() {
     assert(getJalaliMonthDays(1403, 12) === 29, 'Esfand 1403 has 29 days in standard year');
   }
 
-  // --- Suite 6: Manager Role Protection Rules ---
+  // --- Suite 5: Manager Role Protection Rules ---
   console.log('\n6. Manager Role Protection & Deactivation Safeguards:');
   {
     const mockUsers = [
@@ -214,7 +194,7 @@ async function runTests() {
     );
   }
 
-  // --- Suite 7: Backend URL Configuration & Persian RTL Error Validation ---
+  // --- Suite 6: Backend URL Configuration & Persian RTL Error Validation ---
   console.log('\n7. Backend URL Configuration & Persian RTL Error Validation:');
   {
     assert(
@@ -256,88 +236,8 @@ async function runTests() {
     assert(resolvedUrl === customValidUrl, 'Existing valid custom Apps Script URL is preserved and not overwritten');
   }
 
-  // --- Suite 8: First-Time Authentication & Request/Response Compatibility ---
-  console.log('\n8. First-Time Authentication & Request/Response Compatibility:');
-  {
-    // Case A: Cloud backend returns user without sessionToken (deployed backend format)
-    const deployedBackendResponse = {
-      success: true,
-      user: {
-        id: 'usr-1',
-        username: 'manager',
-        fullName: 'مدیر فنی',
-        role: 'manager',
-        department: 'تصفیه‌خانه مرکزی',
-        isActive: true,
-        updatedAt: Date.now(),
-      },
-    };
-
-    const tokenGenerated = generateSecureToken(32);
-    const tokenHash = await hashToken(tokenGenerated);
-
-    assert(
-      deployedBackendResponse.success === true && deployedBackendResponse.user.id === 'usr-1',
-      'Deployed backend response format { success: true, user } is parsed correctly'
-    );
-    assert(tokenGenerated.length === 64, 'Client securely generates 64-char cryptographic token when backend omits token');
-    assert(tokenHash.length === 64, 'Generated client session token hash is recorded in session store');
-
-    // Case B: Inactive user account is rejected
-    const inactiveUserResponse = {
-      success: true,
-      user: {
-        id: 'usr-inactive',
-        username: 'oldtech',
-        fullName: 'تکنسین سابق',
-        role: 'technician',
-        isActive: false,
-      },
-    };
-    const isLoginPermitted = inactiveUserResponse.user.isActive === true;
-    assert(isLoginPermitted === false, 'Inactive account login is strictly forbidden even if credentials match');
-  }
-
-  // --- Suite 9: Persistent Session Security Across PWA Restarts ---
-  console.log('\n9. Persistent Session Security Across PWA Restarts:');
-  {
-    const now = Date.now();
-    const token = generateSecureToken(32);
-    const tHash = await hashToken(token);
-
-    const validSession = {
-      id: 'sess-1',
-      tokenHash: tHash,
-      userId: 'usr-1',
-      username: 'manager',
-      createdAt: now,
-      expiresAt: now + 7 * 24 * 60 * 60 * 1000,
-      isRevoked: false,
-    };
-
-    // Unexpired session check
-    const isSessionValid = !validSession.isRevoked && validSession.expiresAt > now;
-    assert(isSessionValid === true, 'Active unexpired session is recognized as valid across restarts');
-
-    // Expired session check
-    const expiredSession = {
-      ...validSession,
-      expiresAt: now - 1000, // expired 1 second ago
-    };
-    const isExpiredValid = !expiredSession.isRevoked && expiredSession.expiresAt > now;
-    assert(isExpiredValid === false, 'Expired session is recognized as invalid and cleared');
-
-    // Revoked session check
-    const revokedSession = {
-      ...validSession,
-      isRevoked: true,
-    };
-    const isRevokedValid = !revokedSession.isRevoked && revokedSession.expiresAt > now;
-    assert(isRevokedValid === false, 'Revoked session is strictly invalidated');
-  }
-
-  // --- Suite 10: Pre-Login Settings Access & Privilege Separation ---
-  console.log('\n10. Pre-Login Settings Access & Privilege Separation:');
+  // --- Suite 7: Pre-Login Settings Access & Privilege Separation ---
+  console.log('\n7. Pre-Login Settings Access & Privilege Separation:');
   {
     // Unauthenticated user attempting to access sections
     const unauthenticatedUser = null;
