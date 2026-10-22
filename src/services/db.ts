@@ -1,8 +1,6 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import type {
   User,
-  UserCredential,
-  SessionRecord,
   Asset,
   SubAsset,
   MaintenanceEvent,
@@ -10,23 +8,12 @@ import type {
   StoragePart,
   SyncMutation,
 } from '../types';
-import { hashPassword, normalizeUsername } from '../utils/crypto';
 
-export interface TimarDB extends DBSchema {
+interface TimarDB extends DBSchema {
   users: {
     key: string;
     value: User;
     indexes: { 'by-username': string };
-  };
-  userCredentials: {
-    key: string;
-    value: UserCredential;
-    indexes: { 'by-username': string };
-  };
-  sessions: {
-    key: string;
-    value: SessionRecord;
-    indexes: { 'by-tokenHash': string; 'by-user': string };
   };
   assets: {
     key: string;
@@ -65,7 +52,7 @@ export interface TimarDB extends DBSchema {
 }
 
 const DB_NAME = 'timar_cmms_db';
-const DB_VERSION = 3; // Upgraded for secure credentials and sessions
+const DB_VERSION = 2; // Upgraded for authentic Persian dataset
 
 let dbPromise: Promise<IDBPDatabase<TimarDB>> | null = null;
 
@@ -76,15 +63,6 @@ export function getDB(): Promise<IDBPDatabase<TimarDB>> {
         if (!db.objectStoreNames.contains('users')) {
           const userStore = db.createObjectStore('users', { keyPath: 'id' });
           userStore.createIndex('by-username', 'username', { unique: true });
-        }
-        if (!db.objectStoreNames.contains('userCredentials')) {
-          const credStore = db.createObjectStore('userCredentials', { keyPath: 'userId' });
-          credStore.createIndex('by-username', 'usernameNormalized', { unique: true });
-        }
-        if (!db.objectStoreNames.contains('sessions')) {
-          const sessionStore = db.createObjectStore('sessions', { keyPath: 'id' });
-          sessionStore.createIndex('by-tokenHash', 'tokenHash', { unique: true });
-          sessionStore.createIndex('by-user', 'userId');
         }
         if (!db.objectStoreNames.contains('assets')) {
           const assetStore = db.createObjectStore('assets', { keyPath: 'id' });
@@ -124,50 +102,12 @@ export function getDB(): Promise<IDBPDatabase<TimarDB>> {
 }
 
 import { TimeService } from '../utils/timeService';
-import { DEFAULT_APPS_SCRIPT_URL } from '../config/constants';
 
 // Default Seed Data for Water Treatment Plant (in authentic Persian matching Timar Qt)
 export async function initializeDatabase(): Promise<void> {
   TimeService.initFromStorage();
   const db = await getDB();
-
-  // Ensure default cloud URL is configured while preserving any valid custom URL
-  const existingUrlSetting = await db.get('settings', 'appsScriptUrl');
-  if (!existingUrlSetting || !existingUrlSetting.value || typeof existingUrlSetting.value !== 'string' || !existingUrlSetting.value.trim()) {
-    await db.put('settings', { key: 'appsScriptUrl', value: DEFAULT_APPS_SCRIPT_URL });
-  }
-
   const existingAssets = await db.getAll('assets');
-
-  // Safe migration of existing users: migrate legacy plaintext passwords to userCredentials store
-  const existingUsers = await db.getAll('users');
-  for (const u of existingUsers) {
-    const rawUser = u as any;
-    const normalized = normalizeUsername(u.username);
-    const existingCred = await db.get('userCredentials', u.id);
-
-    if (rawUser.password) {
-      const pHash = await hashPassword(rawUser.password);
-      await db.put('userCredentials', {
-        userId: u.id,
-        usernameNormalized: normalized,
-        passwordHash: pHash,
-        updatedAt: TimeService.now(),
-      });
-      delete rawUser.password;
-      await db.put('users', u);
-    } else if (!existingCred) {
-      // Create initial PBKDF2 hash for legacy accounts if credentials store is empty
-      const defaultPass = u.role === 'manager' ? 'Admin#2026@Timar' : 'Tech#2026@Timar';
-      const pHash = await hashPassword(defaultPass);
-      await db.put('userCredentials', {
-        userId: u.id,
-        usernameNormalized: normalized,
-        passwordHash: pHash,
-        updatedAt: TimeService.now(),
-      });
-    }
-  }
 
   // If already seeded with Persian data, ensure schema fields are migrated safely without erasing data
   if (existingAssets.length > 0 && existingAssets[0].name.includes('پمپ')) {
@@ -210,8 +150,6 @@ export async function initializeDatabase(): Promise<void> {
 
   // Clear any old English demo rows
   await db.clear('users');
-  await db.clear('userCredentials');
-  await db.clear('sessions');
   await db.clear('assets');
   await db.clear('subassets');
   await db.clear('events');
@@ -220,11 +158,12 @@ export async function initializeDatabase(): Promise<void> {
 
   const now = TimeService.now();
 
-  // 1. Users (NO plaintext passwords stored in User records)
+  // 1. Users
   const defaultUsers: User[] = [
     {
       id: 'usr-1',
       username: 'manager',
+      password: 'admin123',
       fullName: 'مهندس رضا محمدی',
       role: 'manager',
       department: 'مدیریت فنی و مهندسی تصفیه‌خانه',
@@ -234,6 +173,7 @@ export async function initializeDatabase(): Promise<void> {
     {
       id: 'usr-2',
       username: 'tech1',
+      password: 'tech123',
       fullName: 'علی کریمی',
       role: 'technician',
       department: 'واحد تعمیرات مکانیک',
@@ -243,6 +183,7 @@ export async function initializeDatabase(): Promise<void> {
     {
       id: 'usr-3',
       username: 'tech2',
+      password: 'tech123',
       fullName: 'سارا تهرانی',
       role: 'technician',
       department: 'واحد برق و ابزار دقیق',
@@ -251,30 +192,6 @@ export async function initializeDatabase(): Promise<void> {
     },
   ];
   for (const u of defaultUsers) await db.put('users', u);
-
-  // Initialize secure PBKDF2 credentials in separate credentials store
-  const mgrHash = await hashPassword('Admin#2026@Timar');
-  const tech1Hash = await hashPassword('Tech#2026@Timar');
-  const tech2Hash = await hashPassword('Tech#2026@Timar');
-
-  await db.put('userCredentials', {
-    userId: 'usr-1',
-    usernameNormalized: 'manager',
-    passwordHash: mgrHash,
-    updatedAt: now,
-  });
-  await db.put('userCredentials', {
-    userId: 'usr-2',
-    usernameNormalized: 'tech1',
-    passwordHash: tech1Hash,
-    updatedAt: now,
-  });
-  await db.put('userCredentials', {
-    userId: 'usr-3',
-    usernameNormalized: 'tech2',
-    passwordHash: tech2Hash,
-    updatedAt: now,
-  });
 
   // 2. Inventory / Storage Parts
   const defaultInventory: StoragePart[] = [
