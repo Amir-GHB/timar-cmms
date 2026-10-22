@@ -455,6 +455,9 @@ export class AuthService {
 
     // Call server if configured and online
     const token = this.getSessionToken();
+    if (scriptUrl && scriptUrl.startsWith('http') && typeof navigator !== 'undefined' && navigator.onLine && !this.getServerSessionToken()) {
+      return { success: false, message: 'برای تغییر حساب‌های کاربری باید با نشست معتبر صادرشده از سرور وارد شوید.' };
+    }
     if (scriptUrl && scriptUrl.startsWith('http') && token && typeof navigator !== 'undefined' && navigator.onLine) {
       try {
         const response = await fetch(scriptUrl, {
@@ -542,6 +545,9 @@ export class AuthService {
     }
 
     const token = this.getSessionToken();
+    if (scriptUrl && scriptUrl.startsWith('http') && typeof navigator !== 'undefined' && navigator.onLine && !this.getServerSessionToken()) {
+      return { success: false, message: 'برای تغییر حساب‌های کاربری باید با نشست معتبر صادرشده از سرور وارد شوید.' };
+    }
     if (scriptUrl && scriptUrl.startsWith('http') && token && typeof navigator !== 'undefined' && navigator.onLine) {
       try {
         const response = await fetch(scriptUrl, {
@@ -620,6 +626,9 @@ export class AuthService {
     }
 
     const token = this.getSessionToken();
+    if (scriptUrl && scriptUrl.startsWith('http') && typeof navigator !== 'undefined' && navigator.onLine && !this.getServerSessionToken()) {
+      return { success: false, message: 'برای تغییر حساب‌های کاربری باید با نشست معتبر صادرشده از سرور وارد شوید.' };
+    }
     if (scriptUrl && scriptUrl.startsWith('http') && token && typeof navigator !== 'undefined' && navigator.onLine) {
       try {
         const response = await fetch(scriptUrl, {
