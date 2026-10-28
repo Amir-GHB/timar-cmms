@@ -8,6 +8,8 @@ import type {
   StoragePart,
   SyncStatus,
   UsedPart,
+  AssetNote,
+  TechnicianReport,
 } from './types';
 import { getDB, initializeDatabase } from './services/db';
 import { SyncEngine } from './services/syncEngine';
@@ -21,6 +23,7 @@ import { ReportsSectionView } from './components/views/ReportsSectionView';
 import { RequestsSectionView } from './components/views/RequestsSectionView';
 import { StorageSectionView } from './components/views/StorageSectionView';
 import { SettingsSectionView } from './components/views/SettingsSectionView';
+import { UnifiedInboxView } from './components/inbox/UnifiedInboxView';
 import { EventModal } from './components/maintenance/EventModal';
 import { AssetModal } from './components/assets/AssetModal';
 import { SubAssetModal } from './components/assets/SubAssetModal';
@@ -29,6 +32,8 @@ import { LoginModal } from './components/auth/LoginModal';
 import { OfflineIndicator } from './components/common/OfflineIndicator';
 import { TimeService } from './utils/timeService';
 import { AuthService } from './services/authService';
+import { ReportsService } from './services/reportsService';
+import { InboxReadService } from './services/inboxReadService';
 import { DEFAULT_APPS_SCRIPT_URL } from './config/constants';
 
 export default function App() {
@@ -40,6 +45,9 @@ export default function App() {
   const [events, setEvents] = useState<MaintenanceEvent[]>([]);
   const [schedules, setSchedules] = useState<MaintenanceSchedule[]>([]);
   const [inventory, setInventory] = useState<StoragePart[]>([]);
+  const [notes, setNotes] = useState<AssetNote[]>([]);
+  const [reports, setReports] = useState<TechnicianReport[]>([]);
+  const [readItemIds, setReadItemIds] = useState<Set<string>>(new Set());
 
   const [appsScriptUrl, setAppsScriptUrl] = useState<string>(DEFAULT_APPS_SCRIPT_URL);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('synced');
@@ -134,6 +142,8 @@ export default function App() {
         loadedEvents,
         loadedSchedules,
         loadedInventory,
+        loadedNotes,
+        loadedReports,
         urlSetting,
         queueCount,
       ] = await Promise.all([
@@ -143,6 +153,8 @@ export default function App() {
         db.getAll('events'),
         db.getAll('schedules'),
         db.getAll('inventory'),
+        db.getAll('assetNotes'),
+        db.getAll('technicianReports'),
         db.get('settings', 'appsScriptUrl'),
         db.count('syncQueue'),
       ]);
@@ -153,6 +165,8 @@ export default function App() {
       setEvents(loadedEvents.filter((e) => !e.isDeleted));
       setSchedules(loadedSchedules.filter((s) => !s.isDeleted));
       setInventory(loadedInventory.filter((i) => !i.isDeleted));
+      setNotes(loadedNotes.filter((n) => !n.isDeleted));
+      setReports(loadedReports.filter((r) => !r.isDeleted));
 
       const scriptUrl =
         typeof urlSetting?.value === 'string' && urlSetting.value.trim()
@@ -167,14 +181,21 @@ export default function App() {
       if (authUser) {
         setCurrentUser(authUser);
         AuthService.validateServerSession(scriptUrl).catch(() => {});
+        const readSet = await InboxReadService.getReadItemIds(authUser.username);
+        setReadItemIds(readSet);
       } else {
         setCurrentUser(null);
+        const readSet = await InboxReadService.getReadItemIds();
+        setReadItemIds(readSet);
       }
 
-      unsubscribeAuth = AuthService.subscribe((u) => {
+      unsubscribeAuth = AuthService.subscribe(async (u) => {
         setCurrentUser(u);
         if (!u) {
           setIsLoginModalOpen(true);
+        } else {
+          const reads = await InboxReadService.getReadItemIds(u.username);
+          setReadItemIds(reads);
         }
       });
 
@@ -213,7 +234,12 @@ export default function App() {
     await SyncEngine.triggerSync();
     setIsSyncing(false);
 
-    // Refresh memory
+    await refreshData();
+    await evaluateActiveSchedules();
+  };
+
+  // Comprehensive data refresh
+  const refreshData = async () => {
     const db = await getDB();
     const [
       updatedAssets,
@@ -221,6 +247,8 @@ export default function App() {
       updatedEvents,
       updatedSchedules,
       updatedInventory,
+      updatedNotes,
+      updatedReports,
       newPending,
     ] = await Promise.all([
       db.getAll('assets'),
@@ -228,6 +256,8 @@ export default function App() {
       db.getAll('events'),
       db.getAll('schedules'),
       db.getAll('inventory'),
+      db.getAll('assetNotes'),
+      db.getAll('technicianReports'),
       db.count('syncQueue'),
     ]);
 
@@ -236,9 +266,66 @@ export default function App() {
     setEvents(updatedEvents.filter((e) => !e.isDeleted));
     setSchedules(updatedSchedules.filter((s) => !s.isDeleted));
     setInventory(updatedInventory.filter((i) => !i.isDeleted));
+    setNotes(updatedNotes.filter((n) => !n.isDeleted));
+    setReports(updatedReports.filter((r) => !r.isDeleted));
     setPendingCount(newPending);
 
-    await evaluateActiveSchedules();
+    const readSet = await InboxReadService.getReadItemIds(currentUser?.username);
+    setReadItemIds(readSet);
+  };
+
+  // Inbox read item handlers
+  const handleMarkAsRead = async (itemId: string, itemType: 'request' | 'report') => {
+    await InboxReadService.markAsRead(itemId, itemType, currentUser?.username);
+    setReadItemIds((prev) => new Set([...prev, itemId]));
+  };
+
+  const handleMarkAllAsRead = async () => {
+    const unreadPendingReqs = events.filter(
+      (e) => (e.status === 'pending_request' || e.status === 'pending_approval') && !readItemIds.has(e.id)
+    );
+    const unreadReps = reports.filter((r) => !readItemIds.has(r.id));
+    for (const req of unreadPendingReqs) {
+      await InboxReadService.markAsRead(req.id, 'request', currentUser?.username);
+    }
+    for (const rep of unreadReps) {
+      await InboxReadService.markAsRead(rep.id, 'report', currentUser?.username);
+    }
+    const updated = await InboxReadService.getReadItemIds(currentUser?.username);
+    setReadItemIds(updated);
+  };
+
+  // Link report into a new work order event modal
+  const handleOpenCreateEventFromReport = (report: TechnicianReport) => {
+    const todayTehran = TimeService.getTehranDateString();
+    setEditingEvent({
+      id: '',
+      assetId: report.assetId,
+      assetName: report.assetName,
+      assetCode: report.assetCode || '',
+      title: `رفع خرابی گزارش‌شده: ${report.title}`,
+      description: `ارجاع به گزارش نقص فنی ${report.title}:\n${report.description}`,
+      type: report.severity === 'critical' ? 'emergency' : 'corrective',
+      status: currentUser?.role === 'manager' ? 'scheduled' : 'pending_request',
+      date: todayTehran,
+      hasDeadline: true,
+      deadlineDate: TimeService.calculateNextDueDate(
+        todayTehran,
+        'days',
+        report.severity === 'critical' ? 2 : 7
+      ),
+      technicianId: currentUser?.id || 'usr-2',
+      technicianName: currentUser?.fullName || 'تکنسین عملیات',
+      durationHours: 2,
+      downtimeHours: 0,
+      partsUsed: [],
+      sideEffectsApplied: false,
+      isProvisionalTime: !TimeService.isServerTimeConfirmed(),
+      relatedReportId: report.id,
+      updatedAt: TimeService.now(),
+    } as MaintenanceEvent);
+    setPreselectedAssetId(report.assetId);
+    setIsEventModalOpen(true);
   };
 
   // Secure session login / logout handlers
@@ -353,6 +440,16 @@ export default function App() {
       await db.put('events', updatedEvent);
       setEvents((prev) => prev.map((e) => (e.id === existingEventId ? updatedEvent : e)));
       await SyncEngine.queueMutation('events', 'update', existingEventId, updatedEvent as any);
+
+      if (eventData.relatedReportId) {
+        await ReportsService.linkEventToReport(
+          eventData.relatedReportId,
+          existingEventId,
+          currentUser
+        );
+        const updatedReports = await db.getAll('technicianReports');
+        setReports(updatedReports.filter((r) => !r.isDeleted));
+      }
       return;
     }
 
@@ -383,6 +480,16 @@ export default function App() {
     await db.put('events', newEvent);
     setEvents((prev) => [newEvent, ...prev]);
     await SyncEngine.queueMutation('events', 'create', newId, newEvent as any);
+
+    if (eventData.relatedReportId) {
+      await ReportsService.linkEventToReport(
+        eventData.relatedReportId,
+        newId,
+        currentUser
+      );
+      const updatedReports = await db.getAll('technicianReports');
+      setReports(updatedReports.filter((r) => !r.isDeleted));
+    }
   };
 
   // Complete Event (from CompleteEventModal)
@@ -847,9 +954,13 @@ export default function App() {
     }
   };
 
-  const pendingApprovalsCount = events.filter(
-    (e) => !e.isDeleted && (e.status === 'pending_approval' || e.status === 'pending_request')
-  ).length;
+  const pendingApprovalsCount =
+    events.filter(
+      (e) => !e.isDeleted && (e.status === 'pending_approval' || e.status === 'pending_request')
+    ).length +
+    reports.filter(
+      (r) => !r.isDeleted && (r.status === 'pending_review' || r.status === 'action_required')
+    ).length;
 
   return (
     <div className="min-h-screen flex flex-col bg-[#f3f3f3] text-slate-900 font-vazir" dir="rtl">
@@ -938,6 +1049,11 @@ export default function App() {
               onCompleteEvent={handleCompleteEvent}
               onStartEvent={handleStartEvent}
               onAuthorizeEvent={handleAuthorizeEvent}
+              currentUser={currentUser}
+              notes={notes}
+              reports={reports}
+              onRefreshData={refreshData}
+              onOpenCreateEventFromReport={handleOpenCreateEventFromReport}
             />
           )}
 
@@ -982,14 +1098,21 @@ export default function App() {
             />
           )}
 
-          {activeSection === 'requests' && (
-            <RequestsSectionView
+          {(activeSection === 'inbox' || activeSection === 'requests') && (
+            <UnifiedInboxView
               events={events}
-              userRole={currentUser?.role}
+              reports={reports}
               currentUser={currentUser}
+              userRole={currentUser?.role}
+              readItemIds={readItemIds}
               onApproveEvent={handleApproveEvent}
               onRejectEvent={handleRejectEvent}
               onAuthorizeRequest={handleAuthorizeEvent}
+              onRefreshData={refreshData}
+              onOpenCreateEventFromReport={handleOpenCreateEventFromReport}
+              onMarkAsRead={handleMarkAsRead}
+              onMarkAllAsRead={handleMarkAllAsRead}
+              initialSubTab={activeSection === 'requests' ? 'requests' : 'unread'}
             />
           )}
 

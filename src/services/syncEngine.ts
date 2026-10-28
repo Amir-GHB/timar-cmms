@@ -38,7 +38,7 @@ export class SyncEngine {
   }
 
   public static async queueMutation(
-    entityType: 'users' | 'assets' | 'subassets' | 'events' | 'schedules' | 'inventory',
+    entityType: SyncMutation['entityType'],
     action: 'create' | 'update' | 'delete',
     entityId: string,
     data: Record<string, unknown>
@@ -128,8 +128,16 @@ export class SyncEngine {
     try {
       const mutations = await db.getAll('syncQueue');
       const lastSyncSetting = await db.get('settings', 'lastSyncTimestamp');
-      const lastSyncTimestamp = typeof lastSyncSetting?.value === 'number' ? lastSyncSetting.value : 0;
-      const sessionToken = AuthService.getSessionToken();
+      const lastSyncTimestamp = (lastSyncSetting?.value as number) || 0;
+      const sessionToken = AuthService.getServerSessionToken();
+      if (!sessionToken) {
+        this.isSyncing = false;
+        this.notify('error', pendingCount);
+        return {
+          success: false,
+          message: 'همگام‌سازی ابری نیازمند ورود به حساب کاربری متصل به سرور ابری است. تغییرات در صف محلی حفظ می‌شوند.',
+        };
+      }
 
       const payload = {
         action: 'syncFull',

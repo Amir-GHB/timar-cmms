@@ -140,8 +140,16 @@ export class AuthService {
   }
 
   /**
+   * Returns the session token only if the current session was issued by and validated against the cloud server.
+   */
+  public static getServerSessionToken(): string | null {
+    const session = this.getSession();
+    return session && session.serverAuthenticated === true ? session.token : null;
+  }
+
+  /**
    * Validates active session against server when online.
-   * If server rejects or token is revoked, session is invalidated.
+   * If server rejects, revokes, or returns 401/403, session is invalidated.
    */
   public static async validateServerSession(scriptUrl: string): Promise<{ isValid: boolean; user?: User }> {
     const session = this.getSession();
@@ -168,17 +176,23 @@ export class AuthService {
         }),
       });
 
+      if (response.status === 401 || response.status === 403) {
+        await this.logout(scriptUrl);
+        return { isValid: false };
+      }
+
       if (!response.ok) {
-        // Network or HTTP status issue: fallback to local verified session token
+        // Network or non-auth HTTP status issue: retain local verified session token without upgrading
         return { isValid: true, user: session.user };
       }
 
       const result = await response.json();
       if (result.success && result.user) {
-        // Refresh authoritative user from server
+        // Refresh authoritative user from server and mark serverAuthenticated
         this.activeSession = {
           ...session,
           user: result.user,
+          serverAuthenticated: true,
         };
         localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(this.activeSession));
         const db = await getDB();
@@ -191,7 +205,7 @@ export class AuthService {
         return { isValid: false };
       }
     } catch {
-      // Offline / transient network error: fallback to local cryptographic token record
+      // Offline / transient network error: do not alter serverAuthenticated status
       return { isValid: true, user: session.user };
     }
   }
@@ -236,13 +250,22 @@ export class AuthService {
               return { success: false, message: 'این حساب کاربری غیرفعال شده است. لطفاً با مدیر سیستم تماس بگیرید.' };
             }
 
+            const serverToken = typeof result.sessionToken === 'string' ? result.sessionToken.trim() : '';
+            const isValidHex64 = /^[0-9a-fA-F]{64}$/.test(serverToken);
+            const now = TimeService.now();
+            const serverExpiresAt = typeof result.expiresAt === 'number' ? result.expiresAt : 0;
+
+            // Never generate a client-side fallback token when server response omits or invalidates token
+            if (!isValidHex64 || serverExpiresAt <= now) {
+              return {
+                success: false,
+                message: 'پاسخ سرور ابری حاوی شناسه معتبر نشست کاری (توکن ۶۴ کاراکتری) یا زمان انقضا نمی‌باشد.',
+                isServerError: true,
+              };
+            }
+
             const db = await getDB();
             await db.put('users', result.user);
-
-            // Use token from server or generate a secure cryptographic token
-            const token = result.sessionToken || generateSecureToken();
-            const now = TimeService.now();
-            const expiresAt = result.expiresAt || (now + SESSION_DURATION_MS);
 
             // Cache salted PBKDF2 hash of this valid password locally for seamless offline login
             const pHash = await hashPassword(password);
@@ -254,7 +277,7 @@ export class AuthService {
             });
 
             // Record cryptographic session in local sessions store
-            const tHash = await hashToken(token);
+            const tHash = await hashToken(serverToken);
             await db.put('sessions', {
               id: `sess-${now}-${Math.random().toString(36).substring(2, 6)}`,
               tokenHash: tHash,
@@ -262,15 +285,16 @@ export class AuthService {
               username: result.user.username,
               role: result.user.role,
               createdAt: now,
-              expiresAt,
+              expiresAt: serverExpiresAt,
               isRevoked: false,
             });
 
             const session: AuthSession = {
-              token,
+              token: serverToken,
               user: result.user,
-              expiresAt,
+              expiresAt: serverExpiresAt,
               createdAt: now,
+              serverAuthenticated: true,
             };
 
             this.activeSession = session;
@@ -349,6 +373,7 @@ export class AuthService {
       user,
       expiresAt,
       createdAt: now,
+      serverAuthenticated: false,
     };
 
     this.activeSession = session;
@@ -436,8 +461,8 @@ export class AuthService {
 
     const normalized = normalizeUsername(userData.username);
 
-    // Call server if configured and online
-    const token = this.getSessionToken();
+    // Call server if configured, online, and session is server-authenticated
+    const token = this.getServerSessionToken();
     if (scriptUrl && scriptUrl.startsWith('http') && token && typeof navigator !== 'undefined' && navigator.onLine) {
       try {
         const response = await fetch(scriptUrl, {
@@ -524,7 +549,7 @@ export class AuthService {
       return { success: false, message: passCheck.message || 'رمز عبور حداقل باید ۱۲ کاراکتر باشد.' };
     }
 
-    const token = this.getSessionToken();
+    const token = this.getServerSessionToken();
     if (scriptUrl && scriptUrl.startsWith('http') && token && typeof navigator !== 'undefined' && navigator.onLine) {
       try {
         const response = await fetch(scriptUrl, {
@@ -602,7 +627,7 @@ export class AuthService {
       }
     }
 
-    const token = this.getSessionToken();
+    const token = this.getServerSessionToken();
     if (scriptUrl && scriptUrl.startsWith('http') && token && typeof navigator !== 'undefined' && navigator.onLine) {
       try {
         const response = await fetch(scriptUrl, {

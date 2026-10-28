@@ -202,11 +202,12 @@ export const EventModal: React.FC<EventModalProps> = ({
         description,
         solution,
         partsUsed: usedParts,
+        relatedReportId: initialEvent?.relatedReportId,
         approvedBy: initialEvent?.approvedBy,
         approvalNotes: initialEvent?.approvalNotes,
         approvalDate: initialEvent?.approvalDate,
       },
-      initialEvent?.id
+      initialEvent?.id || undefined
     );
 
     onClose();

@@ -9,6 +9,7 @@ import {
   CalendarClock,
   History as HistoryIcon,
   Info,
+  FileText,
   Calendar,
   CheckCircle2,
   AlertTriangle,
@@ -31,11 +32,15 @@ import type {
   StoragePart,
   Role,
   UsedPart,
+  AssetNote,
+  TechnicianReport,
+  User as UserType,
 } from '../../types';
 import { formatPersianDate, toPersianDigits } from '../../utils/persianDate';
 import { LinkPartModal } from '../assets/LinkPartModal';
 import { EventDetailsModal } from '../maintenance/EventDetailsModal';
 import { CompleteEventModal } from '../maintenance/CompleteEventModal';
+import { AssetNotesAndReportsTab } from '../assets/AssetNotesAndReportsTab';
 
 interface OverallViewProps {
   assets: Asset[];
@@ -68,9 +73,14 @@ interface OverallViewProps {
   ) => void;
   onStartEvent?: (eventId: string) => void;
   onAuthorizeEvent?: (eventId: string) => void;
+  currentUser?: UserType | null;
+  notes?: AssetNote[];
+  reports?: TechnicianReport[];
+  onRefreshData?: () => Promise<void>;
+  onOpenCreateEventFromReport?: (report: TechnicianReport) => void;
 }
 
-type AssetTab = 'overview' | 'history' | 'subassets' | 'events' | 'schedules' | 'parts';
+type AssetTab = 'overview' | 'notes_reports' | 'history' | 'subassets' | 'events' | 'schedules' | 'parts';
 
 export const OverallView: React.FC<OverallViewProps> = ({
   assets,
@@ -95,6 +105,11 @@ export const OverallView: React.FC<OverallViewProps> = ({
   onCompleteEvent,
   onStartEvent,
   onAuthorizeEvent,
+  currentUser,
+  notes = [],
+  reports = [],
+  onRefreshData,
+  onOpenCreateEventFromReport,
 }) => {
   const [selectedAssetId, setSelectedAssetId] = useState<string>(assets[0]?.id || '');
   const [activeTab, setActiveTab] = useState<AssetTab>('overview');
@@ -131,6 +146,7 @@ export const OverallView: React.FC<OverallViewProps> = ({
 
   const tabs = [
     { id: 'overview' as AssetTab, label: 'شرح کلی', icon: Info },
+    { id: 'notes_reports' as AssetTab, label: 'یادداشت‌ها و گزارش‌ها', icon: FileText },
     { id: 'history' as AssetTab, label: 'تاریخچه', icon: HistoryIcon },
     { id: 'subassets' as AssetTab, label: 'تجهیزات جزء', icon: Layers },
     { id: 'events' as AssetTab, label: 'رویدادها', icon: Wrench },
@@ -950,6 +966,20 @@ export const OverallView: React.FC<OverallViewProps> = ({
                   </div>
                 )}
               </div>
+            )}
+
+            {/* Tab 7: یادداشت‌ها و گزارش‌ها (Notes & Reports) */}
+            {activeTab === 'notes_reports' && (
+              <AssetNotesAndReportsTab
+                asset={selectedAsset}
+                subAssets={currentSubAssets}
+                notes={notes}
+                reports={reports}
+                currentUser={currentUser || null}
+                userRole={userRole}
+                onRefreshData={onRefreshData || (async () => {})}
+                onOpenCreateEventFromReport={onOpenCreateEventFromReport}
+              />
             )}
           </div>
         </div>

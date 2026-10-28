@@ -5,7 +5,7 @@ import {
   Wrench,
   Clock,
   FileBarChart,
-  CheckSquare,
+  Inbox,
   Package,
   Settings,
 } from 'lucide-react';
@@ -16,6 +16,7 @@ export type MainSection =
   | 'assets'
   | 'timeline'
   | 'reports'
+  | 'inbox'
   | 'requests'
   | 'storage'
   | 'settings';
@@ -60,9 +61,9 @@ export const NavigationPanel: React.FC<NavigationPanelProps> = ({
       icon: FileBarChart,
     },
     {
-      id: 'requests' as MainSection,
-      label: 'درخواست‌ها',
-      icon: CheckSquare,
+      id: 'inbox' as MainSection,
+      label: 'صندوق ورودی',
+      icon: Inbox,
       badge: pendingApprovalsCount,
     },
     {
@@ -92,7 +93,9 @@ export const NavigationPanel: React.FC<NavigationPanelProps> = ({
         <div className="flex-1 flex flex-col space-y-1.5 px-2 overflow-y-auto pt-2">
           {menuItems.map((item) => {
             const Icon = item.icon;
-            const isActive = activeSection === item.id;
+            const isActive =
+              activeSection === item.id ||
+              (item.id === 'inbox' && (activeSection as string) === 'requests');
 
             return (
               <button
@@ -151,7 +154,9 @@ export const NavigationPanel: React.FC<NavigationPanelProps> = ({
       >
         {menuItems.map((item) => {
           const Icon = item.icon;
-          const isActive = activeSection === item.id;
+          const isActive =
+            activeSection === item.id ||
+            (item.id === 'inbox' && (activeSection as string) === 'requests');
 
           return (
             <button

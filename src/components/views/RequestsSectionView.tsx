@@ -22,6 +22,8 @@ interface RequestsSectionViewProps {
   onApproveEvent: (eventId: string, approvalNotes: string) => void;
   onRejectEvent: (eventId: string, revisionNotes: string) => void;
   onAuthorizeRequest?: (eventId: string, managerNotes?: string) => void;
+  initialSelectedEventId?: string;
+  onItemViewed?: (eventId: string) => void;
 }
 
 export const RequestsSectionView: React.FC<RequestsSectionViewProps> = ({
@@ -31,6 +33,8 @@ export const RequestsSectionView: React.FC<RequestsSectionViewProps> = ({
   onApproveEvent,
   onRejectEvent,
   onAuthorizeRequest,
+  initialSelectedEventId,
+  onItemViewed,
 }) => {
   const [filterStatus, setFilterStatus] = useState<'pending' | 'all' | 'completed' | 'rejected'>('pending');
   const [managerNotes, setManagerNotes] = useState('');
@@ -46,8 +50,21 @@ export const RequestsSectionView: React.FC<RequestsSectionViewProps> = ({
   });
 
   const [selectedEventId, setSelectedEventId] = useState<string>(
-    requestEvents[0]?.id || ''
+    initialSelectedEventId || requestEvents[0]?.id || ''
   );
+
+  React.useEffect(() => {
+    if (initialSelectedEventId) {
+      setSelectedEventId(initialSelectedEventId);
+      onItemViewed?.(initialSelectedEventId);
+    }
+  }, [initialSelectedEventId, onItemViewed]);
+
+  React.useEffect(() => {
+    if (selectedEventId) {
+      onItemViewed?.(selectedEventId);
+    }
+  }, [selectedEventId, onItemViewed]);
 
   const selectedEvent =
     requestEvents.find((e) => e.id === selectedEventId) || requestEvents[0];

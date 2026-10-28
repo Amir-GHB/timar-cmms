@@ -16,11 +16,14 @@ import {
   LogIn,
   AlertTriangle,
   Info,
+  Tag,
+  GitBranch,
 } from 'lucide-react';
 import type { User } from '../../types';
 import { APPS_SCRIPT_CODE } from '../../services/appsScriptTemplate';
 import { UserManagementPanel } from '../settings/UserManagementPanel';
 import { getUrlValidationError, isValidAppsScriptUrl } from '../../config/constants';
+import { APP_VERSION, APP_BUILD_CHANNEL } from '../../version';
 
 interface SettingsSectionViewProps {
   appsScriptUrl: string;
@@ -360,6 +363,36 @@ export const SettingsSectionView: React.FC<SettingsSectionViewProps> = ({
               )}
             </div>
           )}
+        </div>
+
+        {/* Application Build & Version Card */}
+        <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-3">
+          <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+            <div className="flex items-center gap-2">
+              <Tag className="w-5 h-5 text-sky-600" />
+              <div>
+                <h2 className="text-sm font-bold text-slate-900">مشخصات نسخه و بیلد سامانه</h2>
+                <p className="text-[11px] text-slate-500">
+                  شناسه مستقل نسخه نرم‌افزار تیمار جهت ردیابی به‌روزرسانی‌ها
+                </p>
+              </div>
+            </div>
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-mono font-bold text-sky-800 bg-sky-50 border border-sky-200 rounded-lg">
+              <GitBranch className="w-3.5 h-3.5 text-sky-600" />
+              <span>{APP_BUILD_CHANNEL}</span>
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs bg-slate-50 p-3.5 rounded-lg">
+            <div>
+              <span className="text-slate-400 block text-[11px]">نسخه نرم‌افزار (Version)</span>
+              <span className="font-bold font-mono text-slate-800">{APP_VERSION}</span>
+            </div>
+            <div>
+              <span className="text-slate-400 block text-[11px]">کانال استقرار (Build Channel)</span>
+              <span className="font-bold font-mono text-sky-700">{APP_BUILD_CHANNEL}</span>
+            </div>
+          </div>
         </div>
 
         {/* Manager-only User Management Panel (ONLY when authenticated as manager) */}

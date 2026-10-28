@@ -256,7 +256,20 @@ function logSecurityEvent(ss, eventType, username, status, details) {
 
 function createSessionRecord(ss, user) {
   var sessionSheet = ss.getSheetByName("Sessions");
-  if (!sessionSheet) return null;
+  var sessionHeaders = [
+    "id", "tokenHash", "userId", "username", "role", "createdAt", "expiresAt", "isRevoked"
+  ];
+
+  if (!sessionSheet) {
+    sessionSheet = ss.insertSheet("Sessions");
+    sessionSheet.getRange(1, 1, 1, sessionHeaders.length).setValues([sessionHeaders]);
+    sessionSheet.getRange(1, 1, 1, sessionHeaders.length).setFontWeight("bold").setBackground("#0284c7").setFontColor("#ffffff");
+    sessionSheet.setFrozenRows(1);
+  } else if (sessionSheet.getLastRow() === 0) {
+    sessionSheet.getRange(1, 1, 1, sessionHeaders.length).setValues([sessionHeaders]);
+    sessionSheet.getRange(1, 1, 1, sessionHeaders.length).setFontWeight("bold").setBackground("#0284c7").setFontColor("#ffffff");
+    sessionSheet.setFrozenRows(1);
+  }
 
   var token = generateSecureTokenServer();
   var tokenHash = hashTokenServer(token);
@@ -564,7 +577,19 @@ function handleLogin(ss, username, password) {
           updatedAt: parseInt(row[7], 10) || new Date().getTime()
         };
 
-        var sessionInfo = createSessionRecord(ss, safeUser);
+        var sessionInfo = null;
+        try {
+          sessionInfo = createSessionRecord(ss, safeUser);
+        } catch (sessErr) {
+          logSecurityEvent(ss, "LOGIN_FAILED", username, "FAIL", "Session creation exception: " + sessErr.toString());
+          return { success: false, message: "خطا در برقراری نشست کاری در سرور." };
+        }
+
+        if (!sessionInfo || !sessionInfo.sessionToken || !sessionInfo.expiresAt) {
+          logSecurityEvent(ss, "LOGIN_FAILED", username, "FAIL", "Session record returned null");
+          return { success: false, message: "خطا در ایجاد نشست کاری در سرور." };
+        }
+
         logSecurityEvent(ss, "LOGIN_SUCCESS", username, "OK", "");
 
         return {

@@ -166,13 +166,19 @@ export function jalaliToIso(jy: number, jm: number, jd: number): string {
 }
 
 export function formatPersianDate(
-  dateInput: string | Date,
+  dateInput: string | number | Date,
   options?: { showMonthName?: boolean; separator?: string }
 ): string {
   if (!dateInput) return '-';
   try {
     let gy: number, gm: number, gd: number;
-    if (typeof dateInput === 'string') {
+    if (typeof dateInput === 'number') {
+      const d = new Date(dateInput);
+      if (isNaN(d.getTime())) return '-';
+      gy = d.getFullYear();
+      gm = d.getMonth() + 1;
+      gd = d.getDate();
+    } else if (typeof dateInput === 'string') {
       const parts = parseIsoDateParts(dateInput);
       if (parts) {
         [gy, gm, gd] = parts;

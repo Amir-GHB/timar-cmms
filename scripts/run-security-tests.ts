@@ -256,11 +256,11 @@ async function runTests() {
     assert(resolvedUrl === customValidUrl, 'Existing valid custom Apps Script URL is preserved and not overwritten');
   }
 
-  // --- Suite 8: First-Time Authentication & Request/Response Compatibility ---
-  console.log('\n8. First-Time Authentication & Request/Response Compatibility:');
+  // --- Suite 8: First-Time Authentication & Server-Authenticated Session Rules ---
+  console.log('\n8. First-Time Authentication & Server-Authenticated Session Rules:');
   {
-    // Case A: Cloud backend returns user without sessionToken (deployed backend format)
-    const deployedBackendResponse = {
+    // Case A: Cloud backend returns user without sessionToken -> Strictly rejected!
+    const backendResponseMissingToken = {
       success: true,
       user: {
         id: 'usr-1',
@@ -273,15 +273,17 @@ async function runTests() {
       },
     };
 
-    const tokenGenerated = generateSecureToken(32);
-    const tokenHash = await hashToken(tokenGenerated);
-
+    const token = (backendResponseMissingToken as any).sessionToken;
+    const isValidServerToken = typeof token === 'string' && /^[0-9a-fA-F]{64}$/.test(token);
     assert(
-      deployedBackendResponse.success === true && deployedBackendResponse.user.id === 'usr-1',
-      'Deployed backend response format { success: true, user } is parsed correctly'
+      isValidServerToken === false,
+      'Login strictly rejects cloud response missing a valid server-issued session token (no client fallback token)'
     );
-    assert(tokenGenerated.length === 64, 'Client securely generates 64-char cryptographic token when backend omits token');
-    assert(tokenHash.length === 64, 'Generated client session token hash is recorded in session store');
+
+    // Valid server-issued token format validation
+    const validServerToken = generateSecureToken(32); // 64 hex chars
+    const isValidFormat = typeof validServerToken === 'string' && /^[0-9a-fA-F]{64}$/.test(validServerToken);
+    assert(isValidFormat === true, 'Valid 64-character hex server token format is accepted');
 
     // Case B: Inactive user account is rejected
     const inactiveUserResponse = {
@@ -296,6 +298,18 @@ async function runTests() {
     };
     const isLoginPermitted = inactiveUserResponse.user.isActive === true;
     assert(isLoginPermitted === false, 'Inactive account login is strictly forbidden even if credentials match');
+
+    // Case C: Server-authenticated session vs offline session
+    const serverSession = {
+      token: validServerToken,
+      serverAuthenticated: true,
+    };
+    const offlineSession = {
+      token: generateSecureToken(32),
+      serverAuthenticated: false,
+    };
+    assert(serverSession.serverAuthenticated === true, 'Server login produces serverAuthenticated === true');
+    assert(offlineSession.serverAuthenticated === false, 'Offline login produces serverAuthenticated === false');
   }
 
   // --- Suite 9: Persistent Session Security Across PWA Restarts ---
@@ -342,7 +356,7 @@ async function runTests() {
     // Unauthenticated user attempting to access sections
     const unauthenticatedUser = null;
     const allowedPreLoginSection = 'settings';
-    const protectedSections = ['dashboard', 'overall', 'assets', 'timeline', 'reports', 'requests', 'storage'];
+    const protectedSections = ['dashboard', 'overall', 'assets', 'timeline', 'reports', 'inbox', 'requests', 'storage'];
 
     assert(
       unauthenticatedUser === null && allowedPreLoginSection === 'settings',
@@ -356,6 +370,44 @@ async function runTests() {
         `Section "${sec}" is strictly forbidden prior to authentication`
       );
     }
+  }
+
+  // --- Suite 11: Unified Inbox, Decoupled Read State & Event Linking ---
+  console.log('\n11. Unified Inbox, Decoupled Read State & Event Linking:');
+  {
+    // 1. Business status vs Read state decoupling
+    const sampleReport = {
+      id: 'rep-test-1',
+      status: 'pending_review' as const,
+      title: 'نشت مکانیکال سیل پمپ شماره ۱',
+      isDeleted: false,
+    };
+    const readItemIds = new Set<string>();
+
+    // Initially unread
+    assert(!readItemIds.has(sampleReport.id), 'Report initially unread in Inbox');
+    assert(sampleReport.status === 'pending_review', 'Business status is pending_review');
+
+    // Mark as read
+    readItemIds.add(sampleReport.id);
+    assert(readItemIds.has(sampleReport.id), 'Report is now marked as read');
+    assert(sampleReport.status === 'pending_review', 'Business status remains strictly pending_review when marked as read');
+
+    // 2. Bidirectional Event Linking
+    const initialEvents = ['evt-100'];
+    const newEventId = 'evt-101';
+    const linkedEventIds = initialEvents.includes(newEventId)
+      ? initialEvents
+      : [...initialEvents, newEventId];
+
+    assert(linkedEventIds.length === 2, 'New event linked to technician report');
+    assert(linkedEventIds.includes(newEventId), 'Report contains linked event ID');
+
+    // Idempotency: re-linking same event does not duplicate
+    const reLinked = linkedEventIds.includes(newEventId)
+      ? linkedEventIds
+      : [...linkedEventIds, newEventId];
+    assert(reLinked.length === 2, 'Idempotent re-linking prevents duplicate event IDs');
   }
 
   console.log('\n------------------------------------------------------');

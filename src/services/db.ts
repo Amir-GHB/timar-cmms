@@ -9,6 +9,9 @@ import type {
   MaintenanceSchedule,
   StoragePart,
   SyncMutation,
+  AssetNote,
+  TechnicianReport,
+  InboxReadItem,
 } from '../types';
 import { hashPassword, normalizeUsername } from '../utils/crypto';
 
@@ -62,10 +65,25 @@ export interface TimarDB extends DBSchema {
     key: string;
     value: { key: string; value: any };
   };
+  assetNotes: {
+    key: string;
+    value: AssetNote;
+    indexes: { 'by-asset': string; 'by-created': number };
+  };
+  technicianReports: {
+    key: string;
+    value: TechnicianReport;
+    indexes: { 'by-asset': string; 'by-status': string; 'by-severity': string; 'by-created': number };
+  };
+  inboxReadState: {
+    key: string;
+    value: InboxReadItem;
+    indexes: { 'by-user': string; 'by-item': string };
+  };
 }
 
 const DB_NAME = 'timar_cmms_db';
-const DB_VERSION = 3; // Upgraded for secure credentials and sessions
+const DB_VERSION = 4; // Upgraded for Asset Notes, Technician Reports & Unified Inbox
 
 let dbPromise: Promise<IDBPDatabase<TimarDB>> | null = null;
 
@@ -116,6 +134,23 @@ export function getDB(): Promise<IDBPDatabase<TimarDB>> {
         }
         if (!db.objectStoreNames.contains('settings')) {
           db.createObjectStore('settings', { keyPath: 'key' });
+        }
+        if (!db.objectStoreNames.contains('assetNotes')) {
+          const notesStore = db.createObjectStore('assetNotes', { keyPath: 'id' });
+          notesStore.createIndex('by-asset', 'assetId');
+          notesStore.createIndex('by-created', 'createdAt');
+        }
+        if (!db.objectStoreNames.contains('technicianReports')) {
+          const repStore = db.createObjectStore('technicianReports', { keyPath: 'id' });
+          repStore.createIndex('by-asset', 'assetId');
+          repStore.createIndex('by-status', 'status');
+          repStore.createIndex('by-severity', 'severity');
+          repStore.createIndex('by-created', 'createdAt');
+        }
+        if (!db.objectStoreNames.contains('inboxReadState')) {
+          const readStore = db.createObjectStore('inboxReadState', { keyPath: 'id' });
+          readStore.createIndex('by-user', 'userId');
+          readStore.createIndex('by-item', 'itemId');
         }
       },
     });
@@ -203,6 +238,12 @@ export async function initializeDatabase(): Promise<void> {
       if (changed) {
         await db.put('schedules', sch);
       }
+    }
+
+    // 4. Safe migration: ensure sample notes and reports exist for demo
+    const existingNotes = await db.getAll('assetNotes');
+    if (existingNotes.length === 0) {
+      await seedDefaultNotesAndReports(db, TimeService.now());
     }
 
     return;
@@ -654,10 +695,170 @@ export async function initializeDatabase(): Promise<void> {
   ];
   for (const evt of defaultEvents) await db.put('events', evt);
 
-  // 7. Settings (Persian by default as requested!)
+  // 7. Seed Default Notes & Reports for Water Treatment Plant
+  await seedDefaultNotesAndReports(db, now);
+
+  // 8. Settings (Persian by default as requested!)
   await db.put('settings', { key: 'language', value: 'fa' });
   await db.put('settings', { key: 'calendarType', value: 'persian' });
   await db.put('settings', { key: 'currentUser', value: defaultUsers[0] });
   await db.put('settings', { key: 'appsScriptUrl', value: '' });
   await db.put('settings', { key: 'lastSyncTimestamp', value: 0 });
+}
+
+export async function seedDefaultNotesAndReports(
+  db: IDBPDatabase<TimarDB>,
+  now: number
+): Promise<void> {
+  const defaultNotes: AssetNote[] = [
+    {
+      id: 'note-1',
+      assetId: 'ast-1',
+      subAssetId: 'sub-1',
+      authorId: 'usr-2',
+      authorName: 'علی کریمی',
+      title: 'پایش ارتعاشات دوره‌ای یاتاقان درایو',
+      body: 'اندازه‌گیری ارتعاشات افقی و عمودی با دستگاه ارتعاش‌سنج پرتابل نشان داد مقدار موثر سرعت (RMS Velocity) روی ۱.۸ میلی‌متر بر ثانیه تثبیت شده که در محدوده کاملاً استاندارد و مطلوب (ناحیه A استاندارد بین‌المللی ISO 10816) قرار دارد. نوبت روانکاری بعدی طبق تقویم انجام شود.',
+      category: 'inspection',
+      createdAt: now - 3 * 86400000,
+      updatedAt: now - 3 * 86400000,
+    },
+    {
+      id: 'note-2',
+      assetId: 'ast-3',
+      authorId: 'usr-1',
+      authorName: 'مهندس رضا محمدی',
+      title: 'ثبت مشخصات سیلیس شارژ شده در بستر فیلتر',
+      body: 'در عملیات نوسازی اخیر، ۱۰ کیسه سیلیس مرغوب دانه‌بندی ۰.۸ الی ۱.۲ میلی‌متر با ضریب یکنواختی ۱.۴ به مخزن اضافه شد و ارتفاع بستر به حد اسمی رسید. نتایج بک‌واش بعدی باید جهت سنجش شسته شدن ریزدانه‌ها بررسی گردد.',
+      category: 'modification',
+      createdAt: now - 10 * 86400000,
+      updatedAt: now - 10 * 86400000,
+    },
+    {
+      id: 'note-3',
+      assetId: 'ast-5',
+      authorId: 'usr-3',
+      authorName: 'سارا تهرانی',
+      title: 'ثبت نرخ بازیافت و فشار کاری اسمی واحد اسمز معکوس',
+      body: 'فشار هدر ورودی پرشر وسل‌ها روی ۱۲.۲ بار و هدایت الکتریکی (EC) خروجی روی ۳۸۰ میکروزیمنس تثبیت گردید. شستشوی شیمیایی ممبران‌ها (CIP) طبق برنامه ۶ ماهه بعدی در نظر گرفته شود.',
+      category: 'observation',
+      createdAt: now - 15 * 86400000,
+      updatedAt: now - 15 * 86400000,
+    },
+  ];
+
+  for (const note of defaultNotes) {
+    await db.put('assetNotes', note);
+  }
+
+  const defaultReports: TechnicianReport[] = [
+    {
+      id: 'rep-1',
+      assetId: 'ast-4',
+      assetName: 'پکیج ازن‌زنی و تزریق گاز',
+      assetCode: 'OZ-201',
+      reporterId: 'usr-3',
+      reporterName: 'سارا تهرانی',
+      title: 'نشتی جزئی گاز در اتصال شیلنگ تفلونی انژکتور ازن',
+      description: 'در حین بازرسی دوره‌ای شیفت صبح، بوی رقیق گاز ازن در مجاورت انژکتور تزریق آب خام استشمام شد. دتکتور پرتابل عدد ۰.۰۸ ppm را ثبت نمود. احتمال خرابی یا شل‌شدن اتصالات تفلونی و نیاز به بررسی گیج فشار وجود دارد.',
+      category: 'leak',
+      severity: 'high',
+      occurrenceDate: '2026-10-23',
+      evidenceNotes: 'بوی گاز در فاصله یک متری انژکتور حس می‌شود و محل اتصال با کف صابون تست شد که حباب‌زایی خفیف داشت.',
+      status: 'pending_review',
+      statusHistory: [
+        {
+          status: 'pending_review',
+          changedAt: now - 2 * 3600000,
+          changedById: 'usr-3',
+          changedByName: 'سارا تهرانی',
+          rationale: 'ثبت اولیه گزارش عیب توسط تکنسین شیفت',
+        },
+      ],
+      relatedEventIds: [],
+      createdAt: now - 2 * 3600000,
+      updatedAt: now - 2 * 3600000,
+    },
+    {
+      id: 'rep-2',
+      assetId: 'ast-6',
+      assetName: 'بلوئر هوادهی روتس حوضچه‌ها',
+      assetCode: 'BL-501',
+      reporterId: 'usr-2',
+      reporterName: 'علی کریمی',
+      title: 'صدای غیرعادی و ارتعاش در دور کاری بالای الکتروموتور',
+      description: 'در بار نامی و فرکانس کاری بالای ۴۸ هرتز، صدای سایش خفیف و ارتعاش متناوب در سمت یاتاقان خروجی کوپلینگ بلوئر شنیده می‌شود. نیازمند بررسی فوری کوپلینگ و تست بلبرینگ‌ها.',
+      category: 'noise',
+      severity: 'medium',
+      occurrenceDate: '2026-10-22',
+      evidenceNotes: 'صدا با استتوسکوپ صنعتی ثبت و شنود شد.',
+      status: 'action_required',
+      reviewedBy: 'مهندس رضا محمدی',
+      reviewedById: 'usr-1',
+      reviewedAt: now - 24 * 3600000,
+      reviewDecision: 'صدور دستورکار بازرسی کوپلینگ و یاتاقان',
+      reviewNotes: 'با توجه به اهمیت هوادهی حوضچه‌ها، دستورکار بازدید فنی صادر شد و برای تکنسین ارسال گردید.',
+      statusHistory: [
+        {
+          status: 'pending_review',
+          changedAt: now - 36 * 3600000,
+          changedById: 'usr-2',
+          changedByName: 'علی کریمی',
+          rationale: 'ثبت گزارش نقص',
+        },
+        {
+          status: 'action_required',
+          changedAt: now - 24 * 3600000,
+          changedById: 'usr-1',
+          changedByName: 'مهندس رضا محمدی',
+          rationale: 'تایید لزوم اقدام فنی سریع',
+        },
+      ],
+      relatedEventIds: [],
+      createdAt: now - 36 * 3600000,
+      updatedAt: now - 24 * 3600000,
+    },
+    {
+      id: 'rep-3',
+      assetId: 'ast-1',
+      assetName: 'پمپ انتقال آب خام ورودی',
+      assetCode: 'P-001',
+      reporterId: 'usr-2',
+      reporterName: 'علی کریمی',
+      title: 'نوسان دمای هوزینگ یاتاقان سمت موتور',
+      description: 'دمای هوزینگ یاتاقان در اوج کارکرد بعدازظهر به ۶۸ درجه سانتی‌گراد رسید. با توجه به آستانه مجاز ۷۵ درجه، فعلاً نیازمند پایش مستمر است.',
+      category: 'vibration',
+      severity: 'low',
+      occurrenceDate: '2026-10-21',
+      evidenceNotes: 'دما توسط ترمومتر لیزری کالیبره‌شده ثبت گردید.',
+      status: 'monitoring',
+      reviewedBy: 'مهندس رضا محمدی',
+      reviewedById: 'usr-1',
+      reviewedAt: now - 48 * 3600000,
+      reviewDecision: 'پایش و تحت نظر گرفتن دما در شیفت‌های کاری',
+      reviewNotes: 'ثبت دمای یاتاقان هر ۴ ساعت یک‌بار در لاگ‌بوک ایستگاه پمپاژ توسط تکنسین شیفت.',
+      statusHistory: [
+        {
+          status: 'pending_review',
+          changedAt: now - 52 * 3600000,
+          changedById: 'usr-2',
+          changedByName: 'علی کریمی',
+        },
+        {
+          status: 'monitoring',
+          changedAt: now - 48 * 3600000,
+          changedById: 'usr-1',
+          changedByName: 'مهندس رضا محمدی',
+          rationale: 'دما در محدوده هشدار اولیه است، نیازمند پایش مستمر تا تثبیت شرایط',
+        },
+      ],
+      relatedEventIds: [],
+      createdAt: now - 52 * 3600000,
+      updatedAt: now - 48 * 3600000,
+    },
+  ];
+
+  for (const rep of defaultReports) {
+    await db.put('technicianReports', rep);
+  }
 }
